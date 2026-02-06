@@ -1,29 +1,33 @@
 package ui
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"image"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // DrawContext wraps /dev/draw primitives minimally.
 type DrawContext struct {
-	ctl     *os.File
-	data    *os.File
-	id      int
-	imgID   int // the display image id (from ctl)
-	Screen  image.Rectangle
-	fontH   int
-	charW   int
-	offsetX int
-	offsetY int
-	white   int // image id for white color
-	black   int // image id for black color
-	nextID  int // next available image id
+	wsys     *os.File
+	data     *os.File
+	winid    int
+	Screen   image.Rectangle
+	fontH    int
+	charW    int
+	offsetX  int
+	offsetY  int
+	white    int // image id for white color
+	black    int // image id for black color
+	nextID   int // next available image id
+	screenID int // our window's screen image
 }
 
 // NewDrawContext initializes the drawing context.
+// For rio windows, we need to create a window through /dev/wsys.
 func NewDrawContext() (*DrawContext, error) {
 	ctx := &DrawContext{
 		fontH:  13, // default font height
@@ -33,46 +37,69 @@ func NewDrawContext() (*DrawContext, error) {
 
 	var err error
 
-	// In 9front, /dev/draw/new when opened and read gives connection info
-	// and that fd becomes the ctl file
-	ctx.ctl, err = os.OpenFile("/dev/draw/new", os.O_RDWR, 0)
+	// First, try to find our window ID from environment or /dev/winid
+	winid, err := getWinID()
+	if err != nil {
+		// No existing window, try creating one through wsys
+		return nil, fmt.Errorf("no window context: %w (must run in rio window)", err)
+	}
+	ctx.winid = winid
+
+	// Read window dimensions from /dev/wsys/winid/wctl
+	wctlPath := fmt.Sprintf("/dev/wsys/%d/wctl", winid)
+	wctl, err := os.Open(wctlPath)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", wctlPath, err)
+	}
+
+	buf := make([]byte, 256)
+	n, err := wctl.Read(buf)
+	wctl.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read wctl: %w", err)
+	}
+
+	// Parse: "winid minx miny maxx maxy ..."
+	fields := strings.Fields(string(buf[:n]))
+	if len(fields) >= 5 {
+		ctx.Screen.Min.X, _ = strconv.Atoi(fields[1])
+		ctx.Screen.Min.Y, _ = strconv.Atoi(fields[2])
+		ctx.Screen.Max.X, _ = strconv.Atoi(fields[3])
+		ctx.Screen.Max.Y, _ = strconv.Atoi(fields[4])
+	}
+
+	// Open /dev/draw/new to get a draw connection
+	newf, err := os.OpenFile("/dev/draw/new", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/draw/new: %w", err)
 	}
 
-	// Read the connection info
-	// Format: 12 strings, each 11 characters wide followed by a blank
-	// n, image_id, chan, repl, minx, miny, maxx, maxy, clipminx, clipminy, clipmaxx, clipmaxy
-	buf := make([]byte, 12*12)
-	n, err := ctx.ctl.Read(buf)
+	// Read connection info
+	drawBuf := make([]byte, 12*12)
+	n, err = newf.Read(drawBuf)
 	if err != nil {
-		ctx.ctl.Close()
+		newf.Close()
 		return nil, fmt.Errorf("read /dev/draw/new: %w", err)
 	}
+	newf.Close()
 
 	if n < 12*12 {
-		ctx.ctl.Close()
 		return nil, fmt.Errorf("short read from /dev/draw/new: got %d bytes", n)
 	}
 
-	// Parse connection ID (first field)
-	ctx.id = atoi(string(buf[0:11]))
-	// Parse image id (second field) - this is the display image
-	ctx.imgID = atoi(string(buf[12:23]))
-
-	// Parse screen rectangle
-	ctx.Screen.Min.X = atoi(string(buf[4*12 : 5*12]))
-	ctx.Screen.Min.Y = atoi(string(buf[5*12 : 6*12]))
-	ctx.Screen.Max.X = atoi(string(buf[6*12 : 7*12]))
-	ctx.Screen.Max.Y = atoi(string(buf[7*12 : 8*12]))
+	connID := atoi(string(drawBuf[0:11]))
+	ctx.screenID = atoi(string(drawBuf[12:23]))
 
 	// Open data file for drawing commands
-	dataPath := fmt.Sprintf("/dev/draw/%d/data", ctx.id)
+	dataPath := fmt.Sprintf("/dev/draw/%d/data", connID)
 	ctx.data, err = os.OpenFile(dataPath, os.O_RDWR, 0)
 	if err != nil {
-		ctx.ctl.Close()
 		return nil, fmt.Errorf("open %s: %w", dataPath, err)
 	}
+
+	// Allocate our window image using 'A' (attach window)
+	// Actually, we need to create an image for our window area
+	ctx.nextID = ctx.screenID + 1
 
 	// Allocate white and black color images
 	ctx.white = ctx.nextID
@@ -92,25 +119,36 @@ func NewDrawContext() (*DrawContext, error) {
 	return ctx, nil
 }
 
+func getWinID() (int, error) {
+	// Try reading from /dev/winid
+	f, err := os.Open("/dev/winid")
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	if scanner.Scan() {
+		id, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
+		if err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
+	return 0, fmt.Errorf("empty winid")
+}
+
 // allocColor allocates a 1x1 replicated image filled with the given color.
 // color format: RRGGBBAA
 func (c *DrawContext) allocColor(id int, color uint32) error {
 	// 'b' message: allocate image
 	// b id[4] screenid[4] refresh[1] chan[4] repl[1] r[4*4] clipr[4*4] color[4]
-	// For a simple solid color, we use a degenerate rectangle and repl=1
 	buf := make([]byte, 1+4+4+1+4+1+16+16+4)
 	buf[0] = 'b'
 	putlong(buf[1:], uint32(id))
-	putlong(buf[5:], 0) // screenid = 0 (no screen, just image)
-	buf[9] = 0          // refresh = Refnone
-	// chan = RGBA32 = 0x0 0x08 0x08 0x08 -> packed as single uint32
-	// Actually for a solid color image, use RGBA32: r8g8b8a8 = 0x20202028
-	// But simpler: use m8 (8-bit greyscale mapped) which is 0x18
-	// Actually, let's use RGBA32: CRed<<4|8, CGreen<<4|8, CBlue<<4|8, CAlpha<<4|8
-	// CRed=0, CGreen=1, CBlue=2, CAlpha=3, CGrey=4, CMap=5
-	// r8g8b8a8 = (0<<4|8) | (1<<4|8)<<8 | (2<<4|8)<<16 | (3<<4|8)<<24
-	// = 0x08 | 0x1800 | 0x280000 | 0x38000000 = 0x38281808
-	putlong(buf[10:], 0x38281808) // RGBA32
+	putlong(buf[5:], 0)           // screenid = 0 (no backing screen)
+	buf[9] = 0                    // refresh = Refnone
+	putlong(buf[10:], 0x38281808) // RGBA32: r8g8b8a8
 	buf[14] = 1                   // repl = 1 (replicate)
 	// r = (0,0)-(1,1)
 	putlong(buf[15:], 0) // r.min.x
@@ -152,11 +190,7 @@ func putlong(b []byte, v uint32) {
 	binary.LittleEndian.PutUint32(b, v)
 }
 
-func putshort(b []byte, v uint16) {
-	binary.LittleEndian.PutUint16(b, v)
-}
-
-// Clear fills the screen with the background color.
+// Clear fills the window with the background color.
 func (c *DrawContext) Clear() {
 	c.offsetX = 0
 	c.offsetY = 0
@@ -166,9 +200,9 @@ func (c *DrawContext) Clear() {
 	r := c.Screen
 	buf := make([]byte, 1+4+4+4+16+8+8)
 	buf[0] = 'd'
-	putlong(buf[1:], uint32(c.imgID)) // dst = screen
-	putlong(buf[5:], uint32(c.white)) // src = white
-	putlong(buf[9:], uint32(c.white)) // mask = white (opaque)
+	putlong(buf[1:], uint32(c.screenID)) // dst = our screen
+	putlong(buf[5:], uint32(c.white))    // src = white
+	putlong(buf[9:], uint32(c.white))    // mask = white (opaque)
 	// dstr = screen rectangle
 	putlong(buf[13:], uint32(r.Min.X))
 	putlong(buf[17:], uint32(r.Min.Y))
@@ -185,22 +219,19 @@ func (c *DrawContext) Clear() {
 }
 
 // Text draws a string at the given position.
-// Since fonts are complex, we draw simple rectangles as placeholders.
 func (c *DrawContext) Text(x, y int, s string) {
 	if len(s) == 0 {
 		return
 	}
 
-	x += c.offsetX
-	y += c.offsetY
+	x += c.offsetX + c.Screen.Min.X
+	y += c.offsetY + c.Screen.Min.Y
 
 	// Skip if off screen
 	if y > c.Screen.Max.Y || y+c.fontH < c.Screen.Min.Y {
 		return
 	}
 
-	// Draw each character as a small rectangle
-	// This is a placeholder until proper font support
 	charX := x
 	for _, ch := range s {
 		if ch == ' ' {
@@ -211,16 +242,16 @@ func (c *DrawContext) Text(x, y int, s string) {
 		// Draw a small filled rectangle for each char
 		buf := make([]byte, 1+4+4+4+16+8+8)
 		buf[0] = 'd'
-		putlong(buf[1:], uint32(c.imgID))  // dst = screen
-		putlong(buf[5:], uint32(c.black))  // src = black
-		putlong(buf[9:], uint32(c.black))  // mask = black (opaque for now)
-		putlong(buf[13:], uint32(charX+1)) // dstr.min.x
-		putlong(buf[17:], uint32(y+2))     // dstr.min.y
+		putlong(buf[1:], uint32(c.screenID))
+		putlong(buf[5:], uint32(c.black))
+		putlong(buf[9:], uint32(c.black))
+		putlong(buf[13:], uint32(charX+1))
+		putlong(buf[17:], uint32(y+2))
 		putlong(buf[21:], uint32(charX+c.charW-1))
 		putlong(buf[25:], uint32(y+c.fontH-2))
-		putlong(buf[29:], 0) // srcp
+		putlong(buf[29:], 0)
 		putlong(buf[33:], 0)
-		putlong(buf[37:], 0) // maskp
+		putlong(buf[37:], 0)
 		putlong(buf[41:], 0)
 
 		c.data.Write(buf)
@@ -236,11 +267,10 @@ func (c *DrawContext) Translate(dx, dy int) {
 
 // Flush flushes the draw buffer to the screen.
 func (c *DrawContext) Flush() {
-	// 'v' command flushes
 	c.data.Write([]byte{'v'})
 }
 
-// Bounds returns the current screen dimensions.
+// Bounds returns the current window dimensions.
 func (c *DrawContext) Bounds() (width, height int) {
 	return c.Screen.Dx(), c.Screen.Dy()
 }
@@ -257,21 +287,25 @@ func (c *DrawContext) StringWidth(s string) int {
 
 // Reattach reattaches the display after a resize.
 func (c *DrawContext) Reattach() error {
-	// Re-read screen dimensions from ctl
-	buf := make([]byte, 12*12)
-	_, err := c.ctl.Seek(0, 0)
+	wctlPath := fmt.Sprintf("/dev/wsys/%d/wctl", c.winid)
+	wctl, err := os.Open(wctlPath)
 	if err != nil {
 		return err
 	}
-	n, err := c.ctl.Read(buf)
+	defer wctl.Close()
+
+	buf := make([]byte, 256)
+	n, err := wctl.Read(buf)
 	if err != nil {
 		return err
 	}
-	if n >= 12*8 {
-		c.Screen.Min.X = atoi(string(buf[4*12 : 5*12]))
-		c.Screen.Min.Y = atoi(string(buf[5*12 : 6*12]))
-		c.Screen.Max.X = atoi(string(buf[6*12 : 7*12]))
-		c.Screen.Max.Y = atoi(string(buf[7*12 : 8*12]))
+
+	fields := strings.Fields(string(buf[:n]))
+	if len(fields) >= 5 {
+		c.Screen.Min.X, _ = strconv.Atoi(fields[1])
+		c.Screen.Min.Y, _ = strconv.Atoi(fields[2])
+		c.Screen.Max.X, _ = strconv.Atoi(fields[3])
+		c.Screen.Max.Y, _ = strconv.Atoi(fields[4])
 	}
 	return nil
 }
@@ -281,7 +315,7 @@ func (c *DrawContext) Close() {
 	if c.data != nil {
 		c.data.Close()
 	}
-	if c.ctl != nil {
-		c.ctl.Close()
+	if c.wsys != nil {
+		c.wsys.Close()
 	}
 }
