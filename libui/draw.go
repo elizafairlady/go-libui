@@ -1,14 +1,10 @@
 package ui
 
 import (
-	"bufio"
 	"encoding/binary"
 	"fmt"
 	"image"
 	"os"
-	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -16,7 +12,9 @@ import (
 type DrawContext struct {
 	ctl      *os.File
 	data     *os.File
-	winid    int
+	connID   int
+	screenID int // the display image id (id 0)
+	winID    int // our window image id (from namedimage)
 	Screen   image.Rectangle
 	fontH    int
 	charW    int
@@ -25,66 +23,77 @@ type DrawContext struct {
 	white    int // image id for white color
 	black    int // image id for black color
 	nextID   int // next available image id
-	screenID int // the display image id
 }
 
 // NewDrawContext initializes the drawing context.
-// Uses the existing draw connection for the current window.
 func NewDrawContext() (*DrawContext, error) {
 	ctx := &DrawContext{
-		fontH:  13, // default font height
-		charW:  7,  // default char width (monospace approximation)
-		nextID: 1,  // start allocating from id 1
+		fontH: 13, // default font height
+		charW: 7,  // default char width (monospace approximation)
 	}
 
 	var err error
 
-	// Get our window ID
-	winid, err := getWinID()
+	// Open /dev/draw/new to create a NEW draw connection for this process
+	// This file stays open as our ctl file
+	ctx.ctl, err = os.OpenFile("/dev/draw/new", os.O_RDWR, 0)
 	if err != nil {
-		return nil, fmt.Errorf("get winid: %w", err)
-	}
-	ctx.winid = winid
-
-	// Find our existing draw connection by enumerating /dev/draw
-	connID, err := findDrawConnection()
-	if err != nil {
-		return nil, fmt.Errorf("find draw connection: %w", err)
+		return nil, fmt.Errorf("open /dev/draw/new: %w", err)
 	}
 
-	// Open the ctl file for our connection
-	ctlPath := fmt.Sprintf("/dev/draw/%d/ctl", connID)
-	ctx.ctl, err = os.OpenFile(ctlPath, os.O_RDWR, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", ctlPath, err)
-	}
-
-	// Read screen info from ctl
+	// Read the connection info: 12 strings, each 11 characters + blank
+	// Format: n, imageid, chan, repl, minx, miny, maxx, maxy, clipminx, clipminy, clipmaxx, clipmaxy
 	buf := make([]byte, 12*12)
 	n, err := ctx.ctl.Read(buf)
 	if err != nil {
 		ctx.ctl.Close()
-		return nil, fmt.Errorf("read ctl: %w", err)
+		return nil, fmt.Errorf("read /dev/draw/new: %w", err)
 	}
 
-	if n >= 12*8 {
-		ctx.screenID = atoi(string(buf[12:23])) // image id
-		ctx.Screen.Min.X = atoi(string(buf[4*12 : 5*12]))
-		ctx.Screen.Min.Y = atoi(string(buf[5*12 : 6*12]))
-		ctx.Screen.Max.X = atoi(string(buf[6*12 : 7*12]))
-		ctx.Screen.Max.Y = atoi(string(buf[7*12 : 8*12]))
+	if n < 12*12 {
+		ctx.ctl.Close()
+		return nil, fmt.Errorf("short read from /dev/draw/new: got %d bytes", n)
 	}
 
-	// Open data file for drawing commands
-	dataPath := fmt.Sprintf("/dev/draw/%d/data", connID)
+	// Parse connection ID (first field)
+	ctx.connID = atoi(string(buf[0:11]))
+	// Parse display image id (second field) - always 0
+	ctx.screenID = atoi(string(buf[12:23]))
+
+	// Parse screen rectangle (fields 5-8: minx, miny, maxx, maxy)
+	ctx.Screen.Min.X = atoi(string(buf[4*12 : 5*12]))
+	ctx.Screen.Min.Y = atoi(string(buf[5*12 : 6*12]))
+	ctx.Screen.Max.X = atoi(string(buf[6*12 : 7*12]))
+	ctx.Screen.Max.Y = atoi(string(buf[7*12 : 8*12]))
+
+	// Open /dev/draw/n/data for drawing commands
+	dataPath := fmt.Sprintf("/dev/draw/%d/data", ctx.connID)
 	ctx.data, err = os.OpenFile(dataPath, os.O_RDWR, 0)
 	if err != nil {
 		ctx.ctl.Close()
 		return nil, fmt.Errorf("open %s: %w", dataPath, err)
 	}
 
-	// Allocate IDs starting after the screen ID
+	// Start allocating IDs after the screen ID
 	ctx.nextID = ctx.screenID + 1
+
+	// Read window name from /dev/winname and get the window image
+	winname, err := readWinname()
+	if err == nil && winname != "" {
+		// Use 'N' message to get the named window image
+		ctx.winID = ctx.nextID
+		ctx.nextID++
+		if err := ctx.namedImage(ctx.winID, winname); err != nil {
+			// If namedimage fails, fall back to screen
+			ctx.winID = ctx.screenID
+		} else {
+			// Read window dimensions from the allocated image
+			ctx.readImageInfo(ctx.winID)
+		}
+	} else {
+		// No window name, use display image directly
+		ctx.winID = ctx.screenID
+	}
 
 	// Allocate white and black color images
 	ctx.white = ctx.nextID
@@ -104,69 +113,64 @@ func NewDrawContext() (*DrawContext, error) {
 	return ctx, nil
 }
 
-// findDrawConnection finds an existing draw connection for this window.
-func findDrawConnection() (int, error) {
-	// List /dev/draw to find available connections
-	entries, err := os.ReadDir("/dev/draw")
+func readWinname() (string, error) {
+	f, err := os.Open("/dev/winname")
 	if err != nil {
-		return 0, fmt.Errorf("readdir /dev/draw: %w", err)
-	}
-
-	var connIDs []int
-	for _, e := range entries {
-		if e.Name() == "new" {
-			continue
-		}
-		if id, err := strconv.Atoi(e.Name()); err == nil {
-			connIDs = append(connIDs, id)
-		}
-	}
-
-	if len(connIDs) == 0 {
-		return 0, fmt.Errorf("no draw connections found")
-	}
-
-	// Sort and use the highest numbered connection (usually the current window)
-	sort.Ints(connIDs)
-
-	// Try each connection from highest to lowest
-	for i := len(connIDs) - 1; i >= 0; i-- {
-		connID := connIDs[i]
-		// Check if we can access this connection's ctl file
-		ctlPath := filepath.Join("/dev/draw", strconv.Itoa(connID), "ctl")
-		if _, err := os.Stat(ctlPath); err == nil {
-			return connID, nil
-		}
-	}
-
-	// If we can't find a specific one, just use the highest
-	return connIDs[len(connIDs)-1], nil
-}
-
-func getWinID() (int, error) {
-	// Try reading from /dev/winid
-	f, err := os.Open("/dev/winid")
-	if err != nil {
-		return 0, err
+		return "", err
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	if scanner.Scan() {
-		id, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
-		if err != nil {
-			return 0, err
-		}
-		return id, nil
+	buf := make([]byte, 256)
+	n, err := f.Read(buf)
+	if err != nil {
+		return "", err
 	}
-	return 0, fmt.Errorf("empty winid")
+	return strings.TrimSpace(string(buf[:n])), nil
+}
+
+// namedImage sends the 'N' message to get a named image
+// N id[4] nname[1] name[nname]
+func (c *DrawContext) namedImage(id int, name string) error {
+	nameBytes := []byte(name)
+	if len(nameBytes) > 255 {
+		nameBytes = nameBytes[:255]
+	}
+
+	buf := make([]byte, 1+4+1+len(nameBytes))
+	buf[0] = 'N'
+	putlong(buf[1:], uint32(id))
+	buf[5] = byte(len(nameBytes))
+	copy(buf[6:], nameBytes)
+
+	_, err := c.data.Write(buf)
+	if err != nil {
+		return err
+	}
+
+	// Read response - need to read back the image info
+	// The response comes as data that we need to interpret
+	return nil
+}
+
+// readImageInfo reads image info by querying via 'I' message or re-reading ctl
+func (c *DrawContext) readImageInfo(id int) {
+	// Re-read ctl to get updated info for this image
+	buf := make([]byte, 12*12)
+	c.ctl.Seek(0, 0)
+	n, err := c.ctl.Read(buf)
+	if err != nil || n < 12*8 {
+		return
+	}
+	c.Screen.Min.X = atoi(string(buf[4*12 : 5*12]))
+	c.Screen.Min.Y = atoi(string(buf[5*12 : 6*12]))
+	c.Screen.Max.X = atoi(string(buf[6*12 : 7*12]))
+	c.Screen.Max.Y = atoi(string(buf[7*12 : 8*12]))
 }
 
 // allocColor allocates a 1x1 replicated image filled with the given color.
 // color format: RRGGBBAA
+// 'b' message: b id[4] screenid[4] refresh[1] chan[4] repl[1] r[4*4] clipr[4*4] color[4]
 func (c *DrawContext) allocColor(id int, color uint32) error {
-	// 'b' message: allocate image
-	// b id[4] screenid[4] refresh[1] chan[4] repl[1] r[4*4] clipr[4*4] color[4]
 	buf := make([]byte, 1+4+4+1+4+1+16+16+4)
 	buf[0] = 'b'
 	putlong(buf[1:], uint32(id))
@@ -215,28 +219,24 @@ func putlong(b []byte, v uint32) {
 }
 
 // Clear fills the window with the background color.
+// 'd' message: d dstid[4] srcid[4] maskid[4] dstr[4*4] srcp[2*4] maskp[2*4]
 func (c *DrawContext) Clear() {
 	c.offsetX = 0
 	c.offsetY = 0
 
-	// 'd' message: draw
-	// d dstid[4] srcid[4] maskid[4] dstr[4*4] srcp[2*4] maskp[2*4]
 	r := c.Screen
 	buf := make([]byte, 1+4+4+4+16+8+8)
 	buf[0] = 'd'
-	putlong(buf[1:], uint32(c.screenID)) // dst = our screen
-	putlong(buf[5:], uint32(c.white))    // src = white
-	putlong(buf[9:], uint32(c.white))    // mask = white (opaque)
-	// dstr = screen rectangle
-	putlong(buf[13:], uint32(r.Min.X))
+	putlong(buf[1:], uint32(c.winID))  // dst = our window
+	putlong(buf[5:], uint32(c.white))  // src = white
+	putlong(buf[9:], uint32(c.white))  // mask = white (opaque)
+	putlong(buf[13:], uint32(r.Min.X)) // dstr
 	putlong(buf[17:], uint32(r.Min.Y))
 	putlong(buf[21:], uint32(r.Max.X))
 	putlong(buf[25:], uint32(r.Max.Y))
-	// srcp = (0,0)
-	putlong(buf[29:], 0)
+	putlong(buf[29:], 0) // srcp
 	putlong(buf[33:], 0)
-	// maskp = (0,0)
-	putlong(buf[37:], 0)
+	putlong(buf[37:], 0) // maskp
 	putlong(buf[41:], 0)
 
 	c.data.Write(buf)
@@ -266,7 +266,7 @@ func (c *DrawContext) Text(x, y int, s string) {
 		// Draw a small filled rectangle for each char
 		buf := make([]byte, 1+4+4+4+16+8+8)
 		buf[0] = 'd'
-		putlong(buf[1:], uint32(c.screenID))
+		putlong(buf[1:], uint32(c.winID))
 		putlong(buf[5:], uint32(c.black))
 		putlong(buf[9:], uint32(c.black))
 		putlong(buf[13:], uint32(charX+1))
@@ -290,6 +290,7 @@ func (c *DrawContext) Translate(dx, dy int) {
 }
 
 // Flush flushes the draw buffer to the screen.
+// 'v' message flushes
 func (c *DrawContext) Flush() {
 	c.data.Write([]byte{'v'})
 }
@@ -311,7 +312,7 @@ func (c *DrawContext) StringWidth(s string) int {
 
 // Reattach reattaches the display after a resize.
 func (c *DrawContext) Reattach() error {
-	// Re-read screen dimensions from ctl
+	// Re-read ctl to get new dimensions
 	buf := make([]byte, 12*12)
 	_, err := c.ctl.Seek(0, 0)
 	if err != nil {
