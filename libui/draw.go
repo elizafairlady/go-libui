@@ -6,13 +6,15 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
 
 // DrawContext wraps /dev/draw primitives minimally.
 type DrawContext struct {
-	wsys     *os.File
+	ctl      *os.File
 	data     *os.File
 	winid    int
 	Screen   image.Rectangle
@@ -23,11 +25,11 @@ type DrawContext struct {
 	white    int // image id for white color
 	black    int // image id for black color
 	nextID   int // next available image id
-	screenID int // our window's screen image
+	screenID int // the display image id
 }
 
 // NewDrawContext initializes the drawing context.
-// For rio windows, we need to create a window through /dev/wsys.
+// Uses the existing draw connection for the current window.
 func NewDrawContext() (*DrawContext, error) {
 	ctx := &DrawContext{
 		fontH:  13, // default font height
@@ -37,68 +39,51 @@ func NewDrawContext() (*DrawContext, error) {
 
 	var err error
 
-	// First, try to find our window ID from environment or /dev/winid
+	// Get our window ID
 	winid, err := getWinID()
 	if err != nil {
-		// No existing window, try creating one through wsys
-		return nil, fmt.Errorf("no window context: %w (must run in rio window)", err)
+		return nil, fmt.Errorf("get winid: %w", err)
 	}
 	ctx.winid = winid
 
-	// Read window dimensions from /dev/wsys/winid/wctl
-	wctlPath := fmt.Sprintf("/dev/wsys/%d/wctl", winid)
-	wctl, err := os.Open(wctlPath)
+	// Find our existing draw connection by enumerating /dev/draw
+	connID, err := findDrawConnection()
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", wctlPath, err)
+		return nil, fmt.Errorf("find draw connection: %w", err)
 	}
 
-	buf := make([]byte, 256)
-	n, err := wctl.Read(buf)
-	wctl.Close()
+	// Open the ctl file for our connection
+	ctlPath := fmt.Sprintf("/dev/draw/%d/ctl", connID)
+	ctx.ctl, err = os.OpenFile(ctlPath, os.O_RDWR, 0)
 	if err != nil {
-		return nil, fmt.Errorf("read wctl: %w", err)
+		return nil, fmt.Errorf("open %s: %w", ctlPath, err)
 	}
 
-	// Parse: "winid minx miny maxx maxy ..."
-	fields := strings.Fields(string(buf[:n]))
-	if len(fields) >= 5 {
-		ctx.Screen.Min.X, _ = strconv.Atoi(fields[1])
-		ctx.Screen.Min.Y, _ = strconv.Atoi(fields[2])
-		ctx.Screen.Max.X, _ = strconv.Atoi(fields[3])
-		ctx.Screen.Max.Y, _ = strconv.Atoi(fields[4])
-	}
-
-	// Open /dev/draw/new to get a draw connection
-	newf, err := os.OpenFile("/dev/draw/new", os.O_RDWR, 0)
+	// Read screen info from ctl
+	buf := make([]byte, 12*12)
+	n, err := ctx.ctl.Read(buf)
 	if err != nil {
-		return nil, fmt.Errorf("open /dev/draw/new: %w", err)
+		ctx.ctl.Close()
+		return nil, fmt.Errorf("read ctl: %w", err)
 	}
 
-	// Read connection info
-	drawBuf := make([]byte, 12*12)
-	n, err = newf.Read(drawBuf)
-	if err != nil {
-		newf.Close()
-		return nil, fmt.Errorf("read /dev/draw/new: %w", err)
+	if n >= 12*8 {
+		ctx.screenID = atoi(string(buf[12:23])) // image id
+		ctx.Screen.Min.X = atoi(string(buf[4*12 : 5*12]))
+		ctx.Screen.Min.Y = atoi(string(buf[5*12 : 6*12]))
+		ctx.Screen.Max.X = atoi(string(buf[6*12 : 7*12]))
+		ctx.Screen.Max.Y = atoi(string(buf[7*12 : 8*12]))
 	}
-	newf.Close()
-
-	if n < 12*12 {
-		return nil, fmt.Errorf("short read from /dev/draw/new: got %d bytes", n)
-	}
-
-	connID := atoi(string(drawBuf[0:11]))
-	ctx.screenID = atoi(string(drawBuf[12:23]))
 
 	// Open data file for drawing commands
 	dataPath := fmt.Sprintf("/dev/draw/%d/data", connID)
 	ctx.data, err = os.OpenFile(dataPath, os.O_RDWR, 0)
 	if err != nil {
+		ctx.ctl.Close()
 		return nil, fmt.Errorf("open %s: %w", dataPath, err)
 	}
 
-	// Allocate our window image using 'A' (attach window)
-	// Actually, we need to create an image for our window area
+	// Allocate IDs starting after the screen ID
 	ctx.nextID = ctx.screenID + 1
 
 	// Allocate white and black color images
@@ -117,6 +102,45 @@ func NewDrawContext() (*DrawContext, error) {
 	}
 
 	return ctx, nil
+}
+
+// findDrawConnection finds an existing draw connection for this window.
+func findDrawConnection() (int, error) {
+	// List /dev/draw to find available connections
+	entries, err := os.ReadDir("/dev/draw")
+	if err != nil {
+		return 0, fmt.Errorf("readdir /dev/draw: %w", err)
+	}
+
+	var connIDs []int
+	for _, e := range entries {
+		if e.Name() == "new" {
+			continue
+		}
+		if id, err := strconv.Atoi(e.Name()); err == nil {
+			connIDs = append(connIDs, id)
+		}
+	}
+
+	if len(connIDs) == 0 {
+		return 0, fmt.Errorf("no draw connections found")
+	}
+
+	// Sort and use the highest numbered connection (usually the current window)
+	sort.Ints(connIDs)
+
+	// Try each connection from highest to lowest
+	for i := len(connIDs) - 1; i >= 0; i-- {
+		connID := connIDs[i]
+		// Check if we can access this connection's ctl file
+		ctlPath := filepath.Join("/dev/draw", strconv.Itoa(connID), "ctl")
+		if _, err := os.Stat(ctlPath); err == nil {
+			return connID, nil
+		}
+	}
+
+	// If we can't find a specific one, just use the highest
+	return connIDs[len(connIDs)-1], nil
 }
 
 func getWinID() (int, error) {
@@ -287,25 +311,21 @@ func (c *DrawContext) StringWidth(s string) int {
 
 // Reattach reattaches the display after a resize.
 func (c *DrawContext) Reattach() error {
-	wctlPath := fmt.Sprintf("/dev/wsys/%d/wctl", c.winid)
-	wctl, err := os.Open(wctlPath)
+	// Re-read screen dimensions from ctl
+	buf := make([]byte, 12*12)
+	_, err := c.ctl.Seek(0, 0)
 	if err != nil {
 		return err
 	}
-	defer wctl.Close()
-
-	buf := make([]byte, 256)
-	n, err := wctl.Read(buf)
+	n, err := c.ctl.Read(buf)
 	if err != nil {
 		return err
 	}
-
-	fields := strings.Fields(string(buf[:n]))
-	if len(fields) >= 5 {
-		c.Screen.Min.X, _ = strconv.Atoi(fields[1])
-		c.Screen.Min.Y, _ = strconv.Atoi(fields[2])
-		c.Screen.Max.X, _ = strconv.Atoi(fields[3])
-		c.Screen.Max.Y, _ = strconv.Atoi(fields[4])
+	if n >= 12*8 {
+		c.Screen.Min.X = atoi(string(buf[4*12 : 5*12]))
+		c.Screen.Min.Y = atoi(string(buf[5*12 : 6*12]))
+		c.Screen.Max.X = atoi(string(buf[6*12 : 7*12]))
+		c.Screen.Max.Y = atoi(string(buf[7*12 : 8*12]))
 	}
 	return nil
 }
@@ -315,7 +335,7 @@ func (c *DrawContext) Close() {
 	if c.data != nil {
 		c.data.Close()
 	}
-	if c.wsys != nil {
-		c.wsys.Close()
+	if c.ctl != nil {
+		c.ctl.Close()
 	}
 }
