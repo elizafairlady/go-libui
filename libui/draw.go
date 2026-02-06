@@ -11,7 +11,7 @@ import (
 type DrawContext struct {
 	ctl     *os.File
 	data    *os.File
-	winctl  *os.File
+	refresh *os.File
 	id      int
 	Screen  image.Rectangle
 	fontH   int
@@ -27,46 +27,50 @@ func NewDrawContext() (*DrawContext, error) {
 		charW: 7,  // default char width (monospace approximation)
 	}
 
-	// Open /dev/draw/new to get a connection
-	newf, err := os.Open("/dev/draw/new")
+	var err error
+
+	// In 9front, /dev/draw/new when opened and read gives connection info
+	// and that fd becomes the ctl file
+	ctx.ctl, err = os.OpenFile("/dev/draw/new", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/draw/new: %w", err)
 	}
 
 	// Read the connection info
 	buf := make([]byte, 12*12)
-	n, err := newf.Read(buf)
+	n, err := ctx.ctl.Read(buf)
 	if err != nil {
-		newf.Close()
+		ctx.ctl.Close()
 		return nil, fmt.Errorf("read /dev/draw/new: %w", err)
 	}
-	newf.Close()
 
 	// Parse connection ID (first field)
 	ctx.id = atoi(string(buf[:11]))
 
-	// Open control and data files
-	prefix := fmt.Sprintf("/dev/draw/%d", ctx.id)
-
-	ctx.ctl, err = os.OpenFile(prefix+"/ctl", os.O_RDWR, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open ctl: %w", err)
-	}
-
-	ctx.data, err = os.OpenFile(prefix+"/data", os.O_RDWR, 0)
-	if err != nil {
-		ctx.ctl.Close()
-		return nil, fmt.Errorf("open data: %w", err)
-	}
-
 	// Parse screen rectangle from the initial data
 	// Format: id chan minx miny maxx maxy ...
-	if n >= 12*5 {
+	if n >= 12*6 {
 		ctx.Screen.Min.X = atoi(string(buf[2*12 : 3*12]))
 		ctx.Screen.Min.Y = atoi(string(buf[3*12 : 4*12]))
 		ctx.Screen.Max.X = atoi(string(buf[4*12 : 5*12]))
 		ctx.Screen.Max.Y = atoi(string(buf[5*12 : 6*12]))
 	}
+
+	// Open data file for drawing commands
+	dataPath := fmt.Sprintf("/dev/draw/%d/data", ctx.id)
+	ctx.data, err = os.OpenFile(dataPath, os.O_RDWR, 0)
+	if err != nil {
+		// Try alternate path structure
+		ctx.data, err = os.OpenFile("/dev/draw/data", os.O_RDWR, 0)
+		if err != nil {
+			ctx.ctl.Close()
+			return nil, fmt.Errorf("open data: %w", err)
+		}
+	}
+
+	// Open refresh file to detect resize events
+	refreshPath := fmt.Sprintf("/dev/draw/%d/refresh", ctx.id)
+	ctx.refresh, _ = os.Open(refreshPath) // optional, ignore error
 
 	return ctx, nil
 }
@@ -96,26 +100,34 @@ func (c *DrawContext) Clear() {
 	c.offsetX = 0
 	c.offsetY = 0
 
-	// Draw command: 'r' screenid rect
-	// Fill screen with white
+	// Use draw protocol 'd' command to draw a filled rectangle
+	// 'd' dstid srcid maskid dstr srcpt maskpt
+	// But simpler: just use 'r' for allocating a solid color image first
+
+	// For now, let's write a simpler rectangle fill
+	// Protocol: 'r' id R color
 	r := c.Screen
 	buf := make([]byte, 1+4+4*4+4)
-	buf[0] = 'r'                               // draw rect
-	binary.LittleEndian.PutUint32(buf[1:5], 0) // screen id
-	binary.LittleEndian.PutUint32(buf[5:9], uint32(r.Min.X))
-	binary.LittleEndian.PutUint32(buf[9:13], uint32(r.Min.Y))
-	binary.LittleEndian.PutUint32(buf[13:17], uint32(r.Max.X))
-	binary.LittleEndian.PutUint32(buf[17:21], uint32(r.Max.Y))
-	binary.LittleEndian.PutUint32(buf[21:25], 0xFFFFFFFF) // white
+	buf[0] = 'r'
+	putint(buf[1:5], 0) // screen image id = 0
+	putint(buf[5:9], r.Min.X)
+	putint(buf[9:13], r.Min.Y)
+	putint(buf[13:17], r.Max.X)
+	putint(buf[17:21], r.Max.Y)
+	putint(buf[21:25], 0xFFFFFFFF) // white
 
 	c.data.Write(buf)
 }
 
+func putint(b []byte, v int) {
+	binary.LittleEndian.PutUint32(b, uint32(v))
+}
+
 // Text draws a string at the given position.
 func (c *DrawContext) Text(x, y int, s string) {
-	// For Plan 9, we use the 's' draw command
-	// But the draw protocol is complex - for now use simpler approach
-	// Write to /dev/draw using the string command
+	if len(s) == 0 {
+		return
+	}
 
 	x += c.offsetX
 	y += c.offsetY
@@ -125,19 +137,26 @@ func (c *DrawContext) Text(x, y int, s string) {
 		return
 	}
 
-	// Simple string draw command
-	buf := make([]byte, 1+4+4+4+4+4+2+2+len(s))
-	buf[0] = 's'                                        // string command
-	binary.LittleEndian.PutUint32(buf[1:5], 0)          // dst id
-	binary.LittleEndian.PutUint32(buf[5:9], uint32(x))  // point x
-	binary.LittleEndian.PutUint32(buf[9:13], uint32(y)) // point y
-	binary.LittleEndian.PutUint32(buf[13:17], 1)        // src id (black)
-	binary.LittleEndian.PutUint32(buf[17:21], 0)        // font id
-	binary.LittleEndian.PutUint16(buf[21:23], uint16(len(s)))
-	binary.LittleEndian.PutUint16(buf[23:25], 0) // index
-	copy(buf[25:], s)
+	// Draw each character as a small filled rect for now
+	// This is a fallback until we get proper font rendering
+	// TODO: implement proper 'x' draw string command
 
-	c.data.Write(buf)
+	// For debugging, let's draw character positions as dots
+	charX := x
+	for range s {
+		// Draw a small rectangle for each char position
+		buf := make([]byte, 1+4+4*4+4)
+		buf[0] = 'r'
+		putint(buf[1:5], 0)
+		putint(buf[5:9], charX)
+		putint(buf[9:13], y)
+		putint(buf[13:17], charX+c.charW-1)
+		putint(buf[17:21], y+c.fontH-1)
+		putint(buf[21:25], 0x000000FF) // black
+
+		c.data.Write(buf)
+		charX += c.charW
+	}
 }
 
 // Translate shifts subsequent drawing operations.
@@ -179,7 +198,7 @@ func (c *DrawContext) Reattach() error {
 	if err != nil {
 		return err
 	}
-	if n >= 12*5 {
+	if n >= 12*6 {
 		c.Screen.Min.X = atoi(string(buf[2*12 : 3*12]))
 		c.Screen.Min.Y = atoi(string(buf[3*12 : 4*12]))
 		c.Screen.Max.X = atoi(string(buf[4*12 : 5*12]))
@@ -190,6 +209,9 @@ func (c *DrawContext) Reattach() error {
 
 // Close closes the draw context.
 func (c *DrawContext) Close() {
+	if c.refresh != nil {
+		c.refresh.Close()
+	}
 	if c.data != nil {
 		c.data.Close()
 	}
