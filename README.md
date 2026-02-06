@@ -52,6 +52,7 @@ go build ./...
 
 ## Constraints
 
+- No external dependencies (pure Go + Plan 9 syscalls)
 - No generics
 - No reflection
 - No goroutines except for input readers
