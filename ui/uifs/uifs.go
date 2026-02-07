@@ -36,6 +36,17 @@ type UIFS struct {
 	// ActionLog records processed actions (for debugging).
 	// Set to non-nil to enable logging.
 	ActionLog []string
+
+	// Renderer callbacks for body/tag text access.
+	// These are wired up by ui.Run() so the app can access
+	// body and tag text through the state proxy using
+	// _body/<id> and _tag/<id> paths.
+	BodyTextFn      func(id string) string
+	SetBodyTextFn   func(id string, text string)
+	BodyDirtyFn     func(id string) bool
+	BodyCleanFn     func(id string)
+	BodySelectionFn func(id string) string
+	TagTextFn       func(id string) string
 }
 
 // New creates a new UIFS with the given app and initial state.
@@ -116,8 +127,8 @@ func (u *UIFS) HandleAction(a *proto.Action) {
 	// Resolve bindings before passing to app
 	u.resolveBindings(a)
 
-	// Pass to app handler
-	u.app.Handle(u.st, a)
+	// Pass to app handler with state proxy for _body/_tag access
+	u.app.Handle(u.stateView(), a)
 
 	// Invalidate tree
 	u.tree = nil
@@ -172,7 +183,7 @@ func (u *UIFS) resolveBindings(a *proto.Action) {
 
 // recompute generates a new tree from the app. Must be called with mu held.
 func (u *UIFS) recompute() {
-	root := u.app.View(u.st)
+	root := u.app.View(u.stateView())
 	if root == nil {
 		u.tree = nil
 		return
@@ -210,6 +221,93 @@ func (u *UIFS) populateBindings() {
 			}
 		}
 	}
+}
+
+// stateProxy wraps MemState and intercepts special paths for
+// renderer-owned state like body text and tag text.
+// Paths:
+//
+//	_body/<id>        → BodyTextFn(id) / SetBodyTextFn(id, value)
+//	_body/<id>/dirty  → BodyDirtyFn(id) returns "1" or "0"
+//	_body/<id>/clean  → set to any value to call BodyCleanFn(id)
+//	_body/<id>/sel    → BodySelectionFn(id)
+//	_tag/<id>         → TagTextFn(id)
+type stateProxy struct {
+	*view.MemState
+	u *UIFS
+}
+
+func (p *stateProxy) Get(path string) string {
+	if len(path) > 6 && path[:6] == "_body/" {
+		rest := path[6:]
+		// Check for sub-paths
+		if idx := indexByte(rest, '/'); idx >= 0 {
+			id := rest[:idx]
+			sub := rest[idx+1:]
+			switch sub {
+			case "dirty":
+				if p.u.BodyDirtyFn != nil && p.u.BodyDirtyFn(id) {
+					return "1"
+				}
+				return "0"
+			case "sel":
+				if p.u.BodySelectionFn != nil {
+					return p.u.BodySelectionFn(id)
+				}
+				return ""
+			}
+			return ""
+		}
+		if p.u.BodyTextFn != nil {
+			return p.u.BodyTextFn(rest)
+		}
+		return ""
+	}
+	if len(path) > 5 && path[:5] == "_tag/" {
+		id := path[5:]
+		if p.u.TagTextFn != nil {
+			return p.u.TagTextFn(id)
+		}
+		return ""
+	}
+	return p.MemState.Get(path)
+}
+
+func (p *stateProxy) Set(path, value string) {
+	if len(path) > 6 && path[:6] == "_body/" {
+		rest := path[6:]
+		if idx := indexByte(rest, '/'); idx >= 0 {
+			id := rest[:idx]
+			sub := rest[idx+1:]
+			switch sub {
+			case "clean":
+				if p.u.BodyCleanFn != nil {
+					p.u.BodyCleanFn(id)
+				}
+				return
+			}
+			return
+		}
+		if p.u.SetBodyTextFn != nil {
+			p.u.SetBodyTextFn(rest, value)
+		}
+		return
+	}
+	p.MemState.Set(path, value)
+}
+
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// stateView returns a state proxy for passing to the app.
+func (u *UIFS) stateView() view.State {
+	return &stateProxy{MemState: u.st, u: u}
 }
 
 // SetState sets a state value and invalidates the tree.

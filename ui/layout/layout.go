@@ -183,6 +183,55 @@ func Measure(n *RNode, conf *Config) {
 		n.MinW = max(w, minw)
 		n.MinH = max(h, minh)
 
+	case "body":
+		// Body is a multi-line text frame — wants lots of space
+		h := conf.FontHeight*5 + pad*2 // at least 5 lines
+		w := 80
+		n.MinW = max(w, minw)
+		n.MinH = max(h, minh)
+		if n.Flex == 0 {
+			n.Flex = 1 // bodies are flex by default
+		}
+
+	case "splitbox":
+		// SplitBox distributes space between children with drag handles.
+		// Measure like a vbox or hbox depending on direction.
+		vertical := n.Props["direction"] != "horizontal"
+		handleSize := 3 // pixels for drag handle between children
+		if vertical {
+			w := 0
+			h := 0
+			for i, c := range n.Children {
+				if c.MinW > w {
+					w = c.MinW
+				}
+				h += c.MinH
+				if i > 0 {
+					h += handleSize
+				}
+			}
+			w += pad * 2
+			h += pad * 2
+			n.MinW = max(w, minw)
+			n.MinH = max(h, minh)
+		} else {
+			w := 0
+			h := 0
+			for i, c := range n.Children {
+				w += c.MinW
+				if c.MinH > h {
+					h = c.MinH
+				}
+				if i > 0 {
+					w += handleSize
+				}
+			}
+			w += pad * 2
+			h += pad * 2
+			n.MinW = max(w, minw)
+			n.MinH = max(h, minh)
+		}
+
 	case "rect":
 		n.MinW = max(minw, 1)
 		n.MinH = max(minh, 1)
@@ -251,6 +300,9 @@ func Layout(n *RNode, bounds draw.Rectangle, conf *Config) {
 
 	case "hbox", "row":
 		layoutBox(n.Children, inner, gap, false, conf)
+
+	case "splitbox":
+		layoutSplitBox(n, inner, conf)
 
 	case "stack":
 		for _, c := range n.Children {
@@ -332,6 +384,123 @@ func layoutBox(children []*RNode, bounds draw.Rectangle, gap int, vertical bool,
 		Layout(c, r, conf)
 		pos += size + gap
 	}
+}
+
+// SplitHandleSize is the pixel height/width of the drag handle between
+// splitbox children. Exported so the renderer can use it.
+const SplitHandleSize = 3
+
+// layoutSplitBox distributes space among children using weights,
+// separated by drag handles of SplitHandleSize pixels.
+func layoutSplitBox(n *RNode, inner draw.Rectangle, conf *Config) {
+	if len(n.Children) == 0 {
+		return
+	}
+	vertical := n.Props["direction"] != "horizontal"
+
+	// Parse weights from the splitbox node or use equal weights.
+	weights := parseSplitWeights(n.Props["weights"], len(n.Children))
+	totalWeight := 0
+	for _, w := range weights {
+		totalWeight += w
+	}
+	if totalWeight == 0 {
+		totalWeight = len(n.Children)
+		for i := range weights {
+			weights[i] = 1
+		}
+	}
+
+	totalAvail := inner.Dy()
+	if !vertical {
+		totalAvail = inner.Dx()
+	}
+	// Subtract handle space
+	handleSpace := SplitHandleSize * (len(n.Children) - 1)
+	distributable := totalAvail - handleSpace
+	if distributable < 0 {
+		distributable = 0
+	}
+
+	pos := inner.Min.Y
+	if !vertical {
+		pos = inner.Min.X
+	}
+
+	for i, c := range n.Children {
+		size := distributable * weights[i] / totalWeight
+
+		var r draw.Rectangle
+		if vertical {
+			r = draw.Rect(inner.Min.X, pos, inner.Max.X, pos+size)
+		} else {
+			r = draw.Rect(pos, inner.Min.Y, pos+size, inner.Max.Y)
+		}
+		Layout(c, r, conf)
+		pos += size
+		if i < len(n.Children)-1 {
+			pos += SplitHandleSize // skip handle
+		}
+	}
+}
+
+// parseSplitWeights parses a comma-separated list of integer weights.
+// Returns equal weights if the string is empty or malformed.
+func parseSplitWeights(s string, n int) []int {
+	weights := make([]int, n)
+	if s == "" {
+		for i := range weights {
+			weights[i] = 1
+		}
+		return weights
+	}
+	// Simple comma split
+	parts := splitComma(s)
+	for i := 0; i < n; i++ {
+		if i < len(parts) {
+			v, err := strconv.Atoi(parts[i])
+			if err != nil || v <= 0 {
+				v = 1
+			}
+			weights[i] = v
+		} else {
+			weights[i] = 1
+		}
+	}
+	return weights
+}
+
+func splitComma(s string) []string {
+	var parts []string
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			parts = append(parts, s[start:i])
+			start = i + 1
+		}
+	}
+	return parts
+}
+
+// SplitHandleRects returns the rectangles for the drag handles in a splitbox.
+// The renderer uses these for painting handles and hit-testing drags.
+func SplitHandleRects(n *RNode) []draw.Rectangle {
+	if n == nil || n.Type != "splitbox" || len(n.Children) < 2 {
+		return nil
+	}
+	vertical := n.Props["direction"] != "horizontal"
+	var rects []draw.Rectangle
+	for i := 0; i < len(n.Children)-1; i++ {
+		cr := n.Children[i].Rect
+		var hr draw.Rectangle
+		if vertical {
+			hr = draw.Rect(cr.Min.X, cr.Max.Y, cr.Max.X, cr.Max.Y+SplitHandleSize)
+		} else {
+			hr = draw.Rect(cr.Max.X, cr.Min.Y, cr.Max.X+SplitHandleSize, cr.Max.Y)
+		}
+		rects = append(rects, hr)
+	}
+	return rects
 }
 
 // --- Helpers ---

@@ -28,6 +28,12 @@ type Renderer struct {
 	// Tag frames (Acme-style editable tag bars)
 	Tags map[string]*TagState
 
+	// Body frames (multi-line editable text areas)
+	Bodies map[string]*BodyState
+
+	// SplitBox weights (persisted across rebuilds for drag resize)
+	SplitWeights map[string]string
+
 	// Cached color images
 	colors map[uint32]*draw.Image
 }
@@ -89,6 +95,10 @@ func (r *Renderer) paintNode(n *layout.RNode) {
 		r.paintTextbox(n)
 	case "tag":
 		r.paintTag(n)
+	case "body":
+		r.paintBody(n)
+	case "splitbox":
+		r.paintSplitBox(n)
 	case "vbox", "hbox", "stack", "row", "scroll", "spacer":
 		r.paintContainer(n)
 	default:

@@ -45,18 +45,37 @@ func Run(title string, app view.App) error {
 	r := render.New(d, th)
 	u := uifs.New(app)
 
+	// Wire up body text access through the UIFS proxy
+	u.BodyTextFn = r.BodyText
+	u.SetBodyTextFn = r.SetBodyText
+	u.BodyDirtyFn = r.BodyDirty
+	u.BodyCleanFn = r.BodyClean
+	u.BodySelectionFn = r.BodySelection
+	u.TagTextFn = r.TagText
+
 	// Build initial tree and layout
 	conf := r.LayoutConfig()
-	repaint := func() {
+
+	buildAndLayout := func() (*proto.Tree, *layout.RNode) {
 		tree := u.Tree()
 		if tree == nil {
-			return
+			return nil, nil
 		}
+		// Apply renderer-persisted split weights to tree nodes
+		applySplitWeights(tree, r)
 		root := layout.Build(tree, conf)
 		if root == nil {
-			return
+			return tree, nil
 		}
 		layout.Layout(root, d.ScreenImage.R, conf)
+		return tree, root
+	}
+
+	repaint := func() {
+		tree, root := buildAndLayout()
+		if tree == nil || root == nil {
+			return
+		}
 		r.Focus = u.Focus
 		r.Paint(root)
 	}
@@ -72,17 +91,13 @@ func Run(title string, app view.App) error {
 			}
 			if m.Buttons == 0 {
 				// Update hover
-				tree := u.Tree()
-				if tree != nil {
-					root := layout.Build(tree, conf)
-					if root != nil {
-						layout.Layout(root, d.ScreenImage.R, conf)
-						hit := layout.HitTest(root, m.Point)
-						if hit != nil {
-							r.Hover = hit.ID
-						} else {
-							r.Hover = ""
-						}
+				tree, root := buildAndLayout()
+				if tree != nil && root != nil {
+					hit := layout.HitTest(root, m.Point)
+					if hit != nil {
+						r.Hover = hit.ID
+					} else {
+						r.Hover = ""
 					}
 				}
 				repaint()
@@ -90,15 +105,43 @@ func Run(title string, app view.App) error {
 			}
 
 			// Click
-			tree := u.Tree()
-			if tree == nil {
+			tree, root := buildAndLayout()
+			if tree == nil || root == nil {
 				continue
 			}
-			root := layout.Build(tree, conf)
-			if root == nil {
-				continue
+
+			// Determine button
+			button := 1
+			if m.Buttons&2 != 0 {
+				button = 2
+			} else if m.Buttons&4 != 0 {
+				button = 3
 			}
-			layout.Layout(root, d.ScreenImage.R, conf)
+
+			// Check for splitbox handle drag first (B1 only)
+			if button == 1 {
+				if splitID, handleIdx, ok := r.SplitHitHandle(root, m.Point); ok {
+					mc.Mouse = m
+					r.SplitDrag(splitID, handleIdx, mc, root, conf, func() {
+						// Re-apply weights and repaint during drag
+						tree := u.Tree()
+						if tree == nil {
+							return
+						}
+						applySplitWeights(tree, r)
+						newRoot := layout.Build(tree, conf)
+						if newRoot == nil {
+							return
+						}
+						layout.Layout(newRoot, d.ScreenImage.R, conf)
+						r.Focus = u.Focus
+						r.Paint(newRoot)
+					})
+					repaint()
+					continue
+				}
+			}
+
 			hit := layout.HitTest(root, m.Point)
 			if hit != nil {
 				// Update focus
@@ -106,22 +149,25 @@ func Run(title string, app view.App) error {
 					u.SetFocus(hit.ID)
 					r.Focus = hit.ID
 				}
-				// Determine button
-				button := 1
-				if m.Buttons&2 != 0 {
-					button = 2
-				} else if m.Buttons&4 != 0 {
-					button = 3
-				}
 
-				// Tag nodes get special handling
-				if hit.Type == "tag" {
+				switch hit.Type {
+				case "tag":
+					// Tag nodes get special handling
 					mc.Mouse = m
 					act := r.TagClick(hit.ID, mc, button)
 					if act != nil {
 						u.HandleAction(act)
 					}
-				} else {
+
+				case "body":
+					// Body nodes get frame-based handling
+					mc.Mouse = m
+					act := r.BodyClick(hit.ID, mc, button)
+					if act != nil {
+						u.HandleAction(act)
+					}
+
+				default:
 					act := render.MouseAction(hit, button, m.Point)
 					if act != nil {
 						u.HandleAction(act)
@@ -142,15 +188,11 @@ func Run(title string, app view.App) error {
 
 			// Tab navigation
 			if key == '\t' {
-				tree := u.Tree()
-				if tree != nil {
-					root := layout.Build(tree, conf)
-					if root != nil {
-						layout.Layout(root, d.ScreenImage.R, conf)
-						next := render.NextFocusable(root, u.Focus)
-						u.SetFocus(next)
-						r.Focus = next
-					}
+				_, root := buildAndLayout()
+				if root != nil {
+					next := render.NextFocusable(root, u.Focus)
+					u.SetFocus(next)
+					r.Focus = next
 				}
 				repaint()
 				continue
@@ -204,14 +246,25 @@ func Run(title string, app view.App) error {
 			}
 
 			// Tag typing — editable tag bar
-			// Tags are renderer-owned; typing doesn't go through UIFS.
-			// Only flush the display after frame.Insert/Delete draws.
 			if u.Focus != "" {
 				tree := u.Tree()
 				if tree != nil {
 					node := tree.Nodes[u.Focus]
 					if node != nil && node.Type == "tag" {
 						r.TagType(u.Focus, key)
+						d.Flush()
+						continue
+					}
+				}
+			}
+
+			// Body typing — multi-line editable text area
+			if u.Focus != "" {
+				tree := u.Tree()
+				if tree != nil {
+					node := tree.Nodes[u.Focus]
+					if node != nil && node.Type == "body" {
+						r.BodyType(u.Focus, key)
 						d.Flush()
 						continue
 					}
@@ -269,6 +322,19 @@ func Run(title string, app view.App) error {
 			d.GetWindow(draw.Refnone)
 			r.Screen = d.ScreenImage
 			repaint()
+		}
+	}
+}
+
+// applySplitWeights updates splitbox nodes in the tree with
+// renderer-persisted weights from drag operations.
+func applySplitWeights(tree *proto.Tree, r *render.Renderer) {
+	if r.SplitWeights == nil {
+		return
+	}
+	for id, weights := range r.SplitWeights {
+		if node, ok := tree.Nodes[id]; ok && node.Type == "splitbox" {
+			node.Props["weights"] = weights
 		}
 	}
 }

@@ -140,6 +140,22 @@ func Tag(id, text string) *Node {
 	return N(id, "tag").Text(text).Prop("focusable", "1")
 }
 
+// Body creates a multi-line editable text area backed by frame.Frame.
+// Like tag, the renderer owns the text buffer. The view tree provides
+// initial text; after first init the frame state persists across rebuilds.
+// Props: text (initial), bg, fg, scrollbar (0|1).
+func Body(id string) *Node {
+	return N(id, "body").Prop("focusable", "1")
+}
+
+// SplitBox creates a container with draggable resize handles between children.
+// Props: direction (vertical|horizontal), weights (comma-separated ints).
+// Children get space proportional to their weight. Drag handles between
+// children allow the user to redistribute space.
+func SplitBox(id string, children ...*Node) *Node {
+	return N(id, "splitbox").Child(children...)
+}
+
 // --- Serialization ---
 
 // Serialize converts the node tree to a proto.Tree for the protocol.
