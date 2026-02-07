@@ -1,16 +1,13 @@
-// Package window provides acme-style windows where body and tag are
-// files backed by rune buffers, following the Plan 9 acme model.
+// Package text provides framework-level text primitives.
 //
-// In real acme (see /sys/src/cmd/acme/dat.h), a Buffer is a
-// disk-backed block cache. We use an in-memory rune slice for now,
-// but the interface is designed so we can swap in disk backing later.
-package window
+// Buffer is a rune buffer supporting insert, delete, and read
+// operations, used by the renderer's body and tag node types.
+// It models Plan 9 acme's Buffer type with an in-memory backing
+// store (the interface supports swapping to disk-backed later).
+package text
 
 // Buffer is a text buffer that stores runes and supports insert,
-// delete, and read operations. It models acme's Buffer type.
-//
-// In acme, Buffer has: nc (char count), cache, and disk-backed Block
-// array. We simplify to in-memory but keep the same operation set.
+// delete, and read operations.
 type Buffer struct {
 	r     []rune // the data
 	seq   int    // modification sequence number

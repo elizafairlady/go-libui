@@ -1,4 +1,4 @@
-package window
+package text
 
 import "testing"
 

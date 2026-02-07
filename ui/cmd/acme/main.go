@@ -17,9 +17,10 @@ import (
 	"strconv"
 
 	"github.com/elizafairlady/go-libui/ui"
+	"github.com/elizafairlady/go-libui/ui/cmd/acme/window"
 	"github.com/elizafairlady/go-libui/ui/proto"
+	"github.com/elizafairlady/go-libui/ui/text"
 	"github.com/elizafairlady/go-libui/ui/view"
-	"github.com/elizafairlady/go-libui/ui/window"
 )
 
 // acmeApp owns a window.Row — the authoritative data store for all
@@ -422,10 +423,20 @@ func (a *acmeApp) init(s view.State) {
 	s.Set("_rev", "1")
 }
 
-// --- RowProvider interface ---
+// --- BodyBufferProvider interface ---
+// Implements render.BodyBufferProvider so that body nodes with a "winid"
+// prop share the Window's body buffer with the renderer.
 
-func (a *acmeApp) WindowRow() *window.Row {
-	return a.row
+func (a *acmeApp) BodyBuffer(nodeID string, props map[string]string) *text.Buffer {
+	if widStr := props["winid"]; widStr != "" {
+		wid, err := strconv.Atoi(widStr)
+		if err == nil {
+			if w := a.row.LookID(wid); w != nil {
+				return &w.Body
+			}
+		}
+	}
+	return nil
 }
 
 // --- Main ---

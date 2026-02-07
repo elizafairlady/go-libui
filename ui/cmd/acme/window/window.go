@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/elizafairlady/go-libui/ui/text"
 )
 
 // Window models an acme window. Each window has:
@@ -13,27 +15,10 @@ import (
 //   - An address register (q0, q1 into body)
 //   - Control state (name, dirty, isdir, etc.)
 //   - An event channel (for external programs that open /event)
-//
-// In real acme (dat.h), Window has: Text tag, Text body, where each
-// Text embeds a Frame and points to a File (which embeds a Buffer).
-// We flatten this: Window directly owns body and tag Buffers.
-//
-// Each Window is identified by an integer ID, chosen sequentially.
-// The filesystem namespace is:
-//
-//	/<id>/addr    — address register (read/write)
-//	/<id>/body    — body text (read: full text; write: append)
-//	/<id>/ctl     — control messages
-//	/<id>/data    — addressed read/write at addr
-//	/<id>/event   — event stream
-//	/<id>/rdsel   — read current selection
-//	/<id>/wrsel   — write replaces selection
-//	/<id>/tag     — tag text (read: full text; write: append)
-//	/<id>/xdata   — bounded read at addr range
 type Window struct {
 	ID   int
-	Tag  Buffer
-	Body Buffer
+	Tag  text.Buffer
+	Body text.Buffer
 
 	// Addr is the address register, set by writing to addr file,
 	// used by data/xdata reads and writes.
@@ -52,41 +37,38 @@ type Window struct {
 	IsScratch bool
 
 	// EventOpen tracks how many readers have the event file open.
-	// When > 0, user actions are sent as events instead of being
-	// handled directly, matching acme's nopen[QWevent] mechanism.
 	EventOpen int
 
-	// Events is the pending event text (acme's w->events).
+	// Events is the pending event text.
 	Events string
 
 	// Col is the column index this window belongs to (-1 if none).
 	Col int
 
-	// Owner is the last mouse button owner character (acme's w->owner).
+	// Owner is the last mouse button owner character.
 	Owner byte
 }
 
-// Range is a text range [Q0, Q1), matching acme's Range struct.
+// Range is a text range [Q0, Q1).
 type Range struct {
 	Q0 int
 	Q1 int
 }
 
-// Row manages all columns and windows, like acme's Row.
-// It serves as the top-level container for the window filesystem.
+// Row manages all columns and windows.
 type Row struct {
 	mu       sync.Mutex
-	Tag      Buffer          // row-level tag
+	Tag      text.Buffer     // row-level tag
 	Cols     []*Column       // columns
 	Windows  map[int]*Window // all windows by ID
 	nextID   int             // next window ID
-	SnarfBuf Buffer          // global snarf buffer (acme's snarfbuf)
+	SnarfBuf text.Buffer     // global snarf buffer
 }
 
-// Column models an acme column. It has a tag and a list of windows.
+// Column models an acme column.
 type Column struct {
 	ID      int
-	Tag     Buffer
+	Tag     text.Buffer
 	Windows []*Window
 }
 
@@ -99,7 +81,7 @@ func NewRow() *Row {
 	return r
 }
 
-// NewColumn adds a new column to the row. Returns the column.
+// NewColumn adds a new column to the row.
 func (r *Row) NewColumn() *Column {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -112,7 +94,6 @@ func (r *Row) NewColumn() *Column {
 }
 
 // NewWindow creates a new window in the given column.
-// Like acme's coladd(). Returns the window.
 func (r *Row) NewWindow(col *Column) *Window {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -145,11 +126,9 @@ func (r *Row) CloseWindow(w *Window) {
 func (r *Row) CloseColumn(col *Column) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Remove all windows in this column
 	for _, w := range col.Windows {
 		delete(r.Windows, w.ID)
 	}
-	// Remove the column
 	for i, c := range r.Cols {
 		if c == col {
 			r.Cols = append(r.Cols[:i], r.Cols[i+1:]...)
@@ -165,23 +144,7 @@ func (r *Row) LookID(id int) *Window {
 	return r.Windows[id]
 }
 
-// Ctl handles control file writes for a window, matching the
-// commands in acme's xfidctlwrite() from xfid.c.
-//
-// Supported commands:
-//   - name <path>\n    — set file name
-//   - clean            — mark clean
-//   - dirty            — mark dirty
-//   - del              — delete (check dirty)
-//   - delete           — delete (force)
-//   - get              — reload from disk
-//   - put              — write to disk
-//   - show             — show dot
-//   - dot=addr         — set selection to addr
-//   - addr=dot         — set addr to selection
-//   - scratch          — mark as scratch
-//   - mark             — mark for undo
-//   - nomark           — disable auto-mark
+// Ctl handles control file writes for a window.
 func (w *Window) Ctl(msg string) error {
 	for len(msg) > 0 {
 		var cmd string
@@ -201,7 +164,9 @@ func (w *Window) Ctl(msg string) error {
 		case cmd == "clean":
 			w.Body.Clean()
 		case cmd == "dirty":
-			w.Body.dirty = true
+			// mark dirty via insert+delete trick (Buffer.dirty is unexported)
+			// For now, just insert and delete a zero-length range
+			w.Body.Insert(w.Body.Nc(), []rune{})
 		case cmd == "scratch":
 			w.IsScratch = true
 		case cmd == "show":
@@ -219,9 +184,7 @@ func (w *Window) Ctl(msg string) error {
 	return nil
 }
 
-// Index returns the index line for this window, matching acme's format:
-// five 11-char decimal fields (id, nchars_tag, nchars_body, isdir, dirty)
-// followed by the tag up to first newline.
+// Index returns the index line for this window, matching acme's format.
 func (w *Window) Index() string {
 	isdir := 0
 	if w.IsDir {
@@ -239,8 +202,7 @@ func (w *Window) Index() string {
 		w.ID, w.Tag.Nc(), w.Body.Nc(), isdir, dirty, tag)
 }
 
-// CtlPrint returns the ctl file contents for reading, matching
-// acme's winctlprint() format.
+// CtlPrint returns the ctl file contents for reading.
 func (w *Window) CtlPrint() string {
 	isdir := 0
 	if w.IsDir {
@@ -254,17 +216,12 @@ func (w *Window) CtlPrint() string {
 		w.ID, w.Tag.Nc(), w.Body.Nc(), isdir, dirty)
 }
 
-// WinEvent appends an event string, like acme's winevent().
-// Events accumulate until read from the event file.
+// WinEvent appends an event string.
 func (w *Window) WinEvent(format string, args ...any) {
 	w.Events += fmt.Sprintf(format, args...)
 }
 
 // ParseAddr parses an address string and sets w.Addr.
-// For now, supports simple forms:
-//   - #n       — character position n
-//   - #n,#m    — range [n, m)
-//   - empty    — whole file (0, nc)
 func (w *Window) ParseAddr(s string) error {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -291,7 +248,6 @@ func (w *Window) ParseAddr(s string) error {
 }
 
 // Snarf copies the selection from w.Body into the global snarf buffer.
-// Like acme's cut() with dosnarf=TRUE, docut=FALSE (the "Snarf" command).
 func (r *Row) Snarf(w *Window) {
 	if w.Sel.Q0 >= w.Sel.Q1 {
 		return
@@ -302,7 +258,6 @@ func (r *Row) Snarf(w *Window) {
 }
 
 // Cut copies the selection into snarf and deletes it from the body.
-// Like acme's cut() with dosnarf=TRUE, docut=TRUE (the "Cut" command).
 func (r *Row) Cut(w *Window) {
 	if w.Sel.Q0 >= w.Sel.Q1 {
 		return
@@ -313,12 +268,10 @@ func (r *Row) Cut(w *Window) {
 }
 
 // Paste inserts the snarf buffer at the selection, replacing it.
-// Like acme's paste() from exec.c.
 func (r *Row) Paste(w *Window) {
 	if r.SnarfBuf.Nc() == 0 {
 		return
 	}
-	// Delete current selection first
 	if w.Sel.Q0 < w.Sel.Q1 {
 		w.Body.Delete(w.Sel.Q0, w.Sel.Q1)
 		w.Sel.Q1 = w.Sel.Q0

@@ -21,15 +21,17 @@ import (
 	"github.com/elizafairlady/go-libui/frame"
 	"github.com/elizafairlady/go-libui/ui/layout"
 	"github.com/elizafairlady/go-libui/ui/proto"
+	"github.com/elizafairlady/go-libui/ui/text"
 	"github.com/elizafairlady/go-libui/ui/theme"
-	"github.com/elizafairlady/go-libui/ui/window"
 )
 
 // BodyState holds the renderer state for a body text area.
-// Text is owned by Buf (a *window.Buffer), NOT by the renderer.
+// Text is owned by Buf (a *text.Buffer). The buffer may be
+// standalone (renderer-owned) or provided externally via
+// the BufferProvider interface.
 type BodyState struct {
 	Frame *frame.Frame
-	Buf   *window.Buffer // the authoritative text — owned by Window or standalone
+	Buf   *text.Buffer   // the authoritative text
 	Org   int            // first rune visible in frame
 	Rect  draw.Rectangle // current layout rect
 	Init  bool           // has been initialized
@@ -37,15 +39,15 @@ type BodyState struct {
 }
 
 // ensureBody ensures a BodyState exists for the given node ID.
-// If a Buffer is provided (from a Window), it's used; otherwise
-// a standalone Buffer is created.
-func (r *Renderer) ensureBody(id string, buf *window.Buffer) *BodyState {
+// If a Buffer is provided (from BodyBufferProvider), it's used;
+// otherwise a standalone Buffer is created.
+func (r *Renderer) ensureBody(id string, buf *text.Buffer) *BodyState {
 	if r.Bodies == nil {
 		r.Bodies = make(map[string]*BodyState)
 	}
 	bs, ok := r.Bodies[id]
 	if ok {
-		// If buffer changed (e.g. window was replaced), update it
+		// If buffer changed (e.g. provider returned a different one), update it
 		if buf != nil && bs.Buf != buf {
 			bs.Buf = buf
 			bs.seq = -1 // force re-sync
@@ -53,7 +55,7 @@ func (r *Renderer) ensureBody(id string, buf *window.Buffer) *BodyState {
 		return bs
 	}
 	if buf == nil {
-		buf = &window.Buffer{}
+		buf = &text.Buffer{}
 	}
 	bs = &BodyState{
 		Frame: &frame.Frame{},
@@ -134,20 +136,10 @@ func (r *Renderer) bodyFill(bs *BodyState) {
 
 // paintBody renders a body node using the frame package.
 func (r *Renderer) paintBody(n *layout.RNode) {
-	// Look up the buffer — either from a Window (via winid prop) or standalone
-	var buf *window.Buffer
-	if r.Row != nil {
-		if widStr := n.Props["winid"]; widStr != "" {
-			wid := 0
-			for _, c := range widStr {
-				if c >= '0' && c <= '9' {
-					wid = wid*10 + int(c-'0')
-				}
-			}
-			if w := r.Row.LookID(wid); w != nil {
-				buf = &w.Body
-			}
-		}
+	// Ask the BufferProvider for an external buffer, if available
+	var buf *text.Buffer
+	if r.BufferProvider != nil {
+		buf = r.BufferProvider.BodyBuffer(n.ID, n.Props)
 	}
 
 	bs := r.ensureBody(n.ID, buf)

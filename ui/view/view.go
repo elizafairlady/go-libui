@@ -11,7 +11,7 @@ import (
 	"sync"
 
 	"github.com/elizafairlady/go-libui/ui/proto"
-	"github.com/elizafairlady/go-libui/ui/window"
+	"github.com/elizafairlady/go-libui/ui/text"
 )
 
 // Node is a UI view tree node with an ID, type, props, and children.
@@ -72,12 +72,14 @@ type Executor interface {
 	BinDirs() []string
 }
 
-// RowProvider is an optional interface that apps can implement to
-// provide a window.Row. When present, body nodes with a "winid"
-// prop get their text buffer from the Row's Window, making the body
-// a proper file-backed view rather than renderer-owned state.
-type RowProvider interface {
-	WindowRow() *window.Row
+// BodyBufferProvider is an optional interface that apps can implement
+// to provide external buffers for body nodes. When present, the
+// renderer calls BodyBuffer before initializing a body node. If a
+// non-nil buffer is returned, the body uses it instead of creating
+// a standalone renderer-owned buffer. This allows apps to share text
+// buffers between their data model and the renderer.
+type BodyBufferProvider interface {
+	BodyBuffer(nodeID string, props map[string]string) *text.Buffer
 }
 
 // --- Node builder helpers ---
@@ -312,4 +314,15 @@ func (s *MemState) GetInt(path string, def int) int {
 func (s *MemState) GetBool(path string) bool {
 	v := s.Get(path)
 	return v == "1" || v == "true"
+}
+
+// Keys returns all keys in the state store.
+func (s *MemState) Keys() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	keys := make([]string, 0, len(s.data))
+	for k := range s.data {
+		keys = append(keys, k)
+	}
+	return keys
 }

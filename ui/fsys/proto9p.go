@@ -1,5 +1,5 @@
-// Package fsys implements a 9P2000 file server for the acme window
-// namespace, directly modeled on /sys/src/cmd/acme/fsys.c.
+// Package fsys implements the 9P2000 wire protocol and provides
+// infrastructure for building 9P file servers.
 //
 // The protocol implementation follows the 9P2000 specification:
 // http://man.cat-v.org/plan_9/5/intro
@@ -68,6 +68,12 @@ const (
 
 // IOHDRSZ is the overhead for a 9P message header
 const IOHDRSZ = 24
+
+// NOTAG is the tag for Tversion/Rversion messages
+const NOTAG = uint16(0xFFFF)
+
+// NOFID is the fid value meaning "no fid"
+const NOFID = uint32(0xFFFFFFFF)
 
 // Qid is the server's unique identification for a file
 type Qid struct {

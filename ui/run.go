@@ -10,8 +10,10 @@ package ui
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/elizafairlady/go-libui/draw"
+	"github.com/elizafairlady/go-libui/ui/fsys"
 	"github.com/elizafairlady/go-libui/ui/layout"
 	"github.com/elizafairlady/go-libui/ui/proto"
 	"github.com/elizafairlady/go-libui/ui/render"
@@ -45,18 +47,18 @@ func Run(title string, app view.App) error {
 	r := render.New(d, th)
 	u := uifs.New(app)
 
-	// Wire up body text access through the UIFS proxy
-	u.BodyTextFn = r.BodyText
-	u.SetBodyTextFn = r.SetBodyText
-	u.BodyDirtyFn = r.BodyDirty
-	u.BodyCleanFn = r.BodyClean
-	u.BodySelectionFn = r.BodySelection
-	u.TagTextFn = r.TagText
+	// If the app provides body buffers, wire them to the renderer
+	if bp, ok := app.(render.BodyBufferProvider); ok {
+		r.BufferProvider = bp
+	}
 
-	// If the app provides a Row, wire it to the renderer so body nodes
-	// with winid get their buffers from Window objects (not renderer state).
-	if rp, ok := app.(view.RowProvider); ok {
-		r.Row = rp.WindowRow()
+	// Start the 9P state server
+	prov := &stateProvider{u: u, r: r}
+	srv := fsys.NewStateServer(prov)
+	sockPath := uiSocketPath(title)
+	if err := srv.ListenAndServe(sockPath); err != nil {
+		// Non-fatal: log and continue without 9P
+		fmt.Fprintf(os.Stderr, "ui: 9P server: %v\n", err)
 	}
 
 	// Create executor for B2 command handling

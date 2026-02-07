@@ -10,9 +10,16 @@ import (
 	"github.com/elizafairlady/go-libui/draw"
 	"github.com/elizafairlady/go-libui/ui/layout"
 	"github.com/elizafairlady/go-libui/ui/proto"
+	"github.com/elizafairlady/go-libui/ui/text"
 	"github.com/elizafairlady/go-libui/ui/theme"
-	"github.com/elizafairlady/go-libui/ui/window"
 )
+
+// BodyBufferProvider is an interface for providing external buffers
+// to body nodes. If BodyBuffer returns non-nil, the body uses that
+// buffer instead of creating a standalone renderer-owned one.
+type BodyBufferProvider interface {
+	BodyBuffer(nodeID string, props map[string]string) *text.Buffer
+}
 
 // Renderer paints a layout tree to a draw.Image.
 type Renderer struct {
@@ -21,10 +28,10 @@ type Renderer struct {
 	Font    *draw.Font
 	Theme   *theme.Theme
 
-	// Row is the window.Row that owns all Window buffers.
-	// Body nodes with a "winid" prop get their Buffer from here.
-	// Set by the app (ui.Run wires this up).
-	Row *window.Row
+	// BufferProvider is an optional interface for external body buffers.
+	// If set, the renderer calls it before initializing body nodes.
+	// If it returns non-nil, that buffer is used instead of a standalone one.
+	BufferProvider BodyBufferProvider
 
 	// State
 	Focus     string         // focused node ID
