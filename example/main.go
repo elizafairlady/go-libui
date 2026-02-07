@@ -198,7 +198,9 @@ func drawPolygons(x, y, w int) {
 		draw.Pt(x+90, y+60),
 	}
 	screen.FillPoly(tri, 0, green, draw.ZP)
-	screen.Poly(tri, draw.Endsquare, draw.Endsquare, 1, display.Black, draw.ZP)
+	// Poly doesn't auto-close; append first point to close outline
+	triClosed := append(tri, tri[0])
+	screen.Poly(triClosed, draw.Endsquare, draw.Endsquare, 1, display.Black, draw.ZP)
 
 	// Pentagon (outlined polygon)
 	pent := make([]draw.Point, 5)
@@ -207,7 +209,8 @@ func drawPolygons(x, y, w int) {
 		angle := float64(i)*2*math.Pi/5 - math.Pi/2
 		pent[i] = draw.Pt(cx+int(25*math.Cos(angle)), cy+int(25*math.Sin(angle)))
 	}
-	screen.Poly(pent, draw.Endsquare, draw.Endsquare, 2, blue, draw.ZP)
+	pentClosed := append(pent, pent[0])
+	screen.Poly(pentClosed, draw.Endsquare, draw.Endsquare, 2, blue, draw.ZP)
 
 	// Star (filled)
 	star := make([]draw.Point, 10)
@@ -221,7 +224,8 @@ func drawPolygons(x, y, w int) {
 		star[i] = draw.Pt(cx2+int(r*math.Cos(angle)), cy2+int(r*math.Sin(angle)))
 	}
 	screen.FillPoly(star, 0, yellow, draw.ZP)
-	screen.Poly(star, draw.Endsquare, draw.Endsquare, 1, display.Black, draw.ZP)
+	starClosed := append(star, star[0])
+	screen.Poly(starClosed, draw.Endsquare, draw.Endsquare, 1, display.Black, draw.ZP)
 
 	// Bezier curve
 	screen.Bezier(

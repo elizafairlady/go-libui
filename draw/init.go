@@ -139,14 +139,21 @@ func geninitdraw(devdir string, errfn func(string), fontname, label, windir stri
 	}
 	d.DefaultFont, err = d.OpenFont(fontname)
 	if err != nil {
-		// Try to get the built-in default font
+		// Try to get the built-in default subfont, then build
+		// a proper font from it — matching the C pattern:
+		//   df = getdefont(display);
+		//   installsubfont("*default*", df);
+		//   snprint(buf, ..., "%d %d\n0 %d\t*default*\n", df->height, df->ascent, df->n-1);
+		//   font = buildfont(display, buf, "*default*");
 		d.DefaultSubfont = d.getdefont()
 		if d.DefaultSubfont != nil {
-			d.DefaultFont = &Font{
-				Display: d,
-				Name:    "*default*",
-				Height:  d.DefaultSubfont.Height,
-				Ascent:  d.DefaultSubfont.Ascent,
+			InstallSubfont("*default*", d.DefaultSubfont)
+			desc := fmt.Sprintf("%d %d\n0 %d\t*default*\n",
+				d.DefaultSubfont.Height, d.DefaultSubfont.Ascent,
+				d.DefaultSubfont.N-1)
+			d.DefaultFont, err = d.BuildFont([]byte(desc), "*default*")
+			if err != nil {
+				d.DefaultFont = nil
 			}
 		}
 	}
