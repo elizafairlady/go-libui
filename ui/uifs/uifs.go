@@ -128,7 +128,7 @@ func (u *UIFS) HandleAction(a *proto.Action) {
 	u.resolveBindings(a)
 
 	// Pass to app handler with state proxy for _body/_tag access
-	u.app.Handle(u.stateView(), a)
+	u.app.Handle(u.StateView(), a)
 
 	// Invalidate tree
 	u.tree = nil
@@ -183,7 +183,7 @@ func (u *UIFS) resolveBindings(a *proto.Action) {
 
 // recompute generates a new tree from the app. Must be called with mu held.
 func (u *UIFS) recompute() {
-	root := u.app.View(u.stateView())
+	root := u.app.View(u.StateView())
 	if root == nil {
 		u.tree = nil
 		return
@@ -305,8 +305,10 @@ func indexByte(s string, c byte) int {
 	return -1
 }
 
-// stateView returns a state proxy for passing to the app.
-func (u *UIFS) stateView() view.State {
+// StateView returns a state proxy for passing to the app.
+// The proxy intercepts _body/ and _tag/ paths, routing them
+// to the renderer's body/tag text accessors.
+func (u *UIFS) StateView() view.State {
 	return &stateProxy{MemState: u.st, u: u}
 }
 

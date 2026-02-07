@@ -53,6 +53,9 @@ func Run(title string, app view.App) error {
 	u.BodySelectionFn = r.BodySelection
 	u.TagTextFn = r.TagText
 
+	// Create executor for B2 command handling
+	ex := newExecutor(app, u, r)
+
 	// Build initial tree and layout
 	conf := r.LayoutConfig()
 
@@ -156,7 +159,12 @@ func Run(title string, app view.App) error {
 					mc.Mouse = m
 					act := r.TagClick(hit.ID, mc, button)
 					if act != nil {
-						u.HandleAction(act)
+						// B2 execute: try executor first
+						if act.Kind == "execute" && ex.execute(act) {
+							// Handled by builtin or external command
+						} else {
+							u.HandleAction(act)
+						}
 					}
 
 				case "body":
@@ -164,7 +172,12 @@ func Run(title string, app view.App) error {
 					mc.Mouse = m
 					act := r.BodyClick(hit.ID, mc, button)
 					if act != nil {
-						u.HandleAction(act)
+						// B2 execute: try executor first
+						if act.Kind == "execute" && ex.execute(act) {
+							// Handled by builtin or external command
+						} else {
+							u.HandleAction(act)
+						}
 					}
 
 				default:

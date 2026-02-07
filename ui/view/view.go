@@ -39,6 +39,38 @@ type App interface {
 	Handle(s State, a *Action)
 }
 
+// ExecContext provides the context for executing a command via B2.
+// This is passed to builtins and made available to external commands
+// via environment variables.
+type ExecContext struct {
+	// ID is the tag/body node ID where the command was invoked.
+	ID string
+	// Cmd is the command word that was B2-clicked.
+	Cmd string
+	// Selection is the current text selection in the focused body, if any.
+	Selection string
+	// State gives access to the UI state (including _body/ and _tag/ proxies).
+	State State
+}
+
+// Builtin is a function that implements a built-in command.
+// It receives the execution context and returns an optional error message.
+type Builtin func(ctx *ExecContext) error
+
+// Executor is an optional interface that apps can implement to
+// provide built-in commands and control external command execution.
+// If an app implements Executor, the framework uses it for B2.
+// If not, the framework falls back to the generic "execute" action.
+type Executor interface {
+	// Builtins returns the app's registered built-in commands.
+	// The framework checks these before trying external commands.
+	Builtins() map[string]Builtin
+
+	// BinDirs returns additional directories to search for external
+	// commands (like Plan 9's $home/bin). Can return nil.
+	BinDirs() []string
+}
+
 // --- Node builder helpers ---
 
 // N creates a new node with the given id and type.
