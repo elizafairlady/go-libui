@@ -434,18 +434,17 @@ func main() {
 				//   n = emenuhit(2, &m, &menu);
 				sel := mc.Menuhit(2, screen, mainMenu)
 				switch sel {
-				case 0: // Clear
-					drawCount = 0
-					redraw()
-				case 1: // Redraw
-					redraw()
 				case 3: // Quit
 					return
+				case 0: // Clear
+					drawCount = 0
 				}
+				redraw() // clean up menu residue
 			}
 			if m.Buttons&4 != 0 {
 				// Right click — color menu
-				sel := mc.Menuhit(4, screen, colorMenu)
+				// Menuhit takes button NUMBER (1=left, 2=middle, 3=right)
+				sel := mc.Menuhit(3, screen, colorMenu)
 				switch sel {
 				case 0:
 					dotColor = display.Black
@@ -460,7 +459,10 @@ func main() {
 				case 5:
 					dotColor = magenta
 				}
-				colorMenu.Lasthit = sel
+				if sel >= 0 {
+					colorMenu.Lasthit = sel
+				}
+				redraw() // clean up menu residue
 			}
 
 		case r := <-kc.C:
