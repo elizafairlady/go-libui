@@ -3,14 +3,15 @@
 // It serves a root directory containing a single read-only file called
 // "hello" whose contents are "hello, world\n".
 //
-// Usage:
+// By default synfs serves 9P on file descriptors 0 and 1 (stdin/stdout),
+// suitable for use with mount(1):
 //
-//	synfs [-a addr]
+//	mount {synfs} /n/synfs
+//	cat /n/synfs/hello
 //
-// The default listen address is localhost:5640. Connect with any 9P
-// client, for example:
+// With -a, synfs listens on a TCP address instead:
 //
-//	9p -a localhost:5640 read hello
+//	synfs -a 'tcp!*!5640'
 package main
 
 import (
@@ -19,13 +20,14 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"9fans.net/go/plan9"
 )
 
-var addr = flag.String("a", ":5640", "listen address")
+var addr = flag.String("a", "", "TCP listen address (default: serve on stdin/stdout)")
 
 // fileContent is what the synthetic file "hello" contains.
 var fileContent = []byte("hello, world\n")
@@ -42,7 +44,7 @@ var (
 	helloQid = plan9.Qid{Path: qidHello, Vers: 0, Type: plan9.QTFILE}
 )
 
-// now returns a fixed timestamp for directory entries.
+// now returns a timestamp for directory entries.
 func now() uint32 { return uint32(time.Now().Unix()) }
 
 // dirBytes marshals a Dir into the wire format used in Rstat and Rread
@@ -79,6 +81,17 @@ func helloDir() *plan9.Dir {
 		Gid:    "none",
 		Muid:   "none",
 	}
+}
+
+// stdioRWC wraps stdin/stdout into an io.ReadWriteCloser, suitable
+// for serving 9P over a pipe (e.g. mount {synfs} /n/synfs).
+type stdioRWC struct{}
+
+func (stdioRWC) Read(b []byte) (int, error)  { return os.Stdin.Read(b) }
+func (stdioRWC) Write(b []byte) (int, error) { return os.Stdout.Write(b) }
+func (stdioRWC) Close() error {
+	os.Stdin.Close()
+	return os.Stdout.Close()
 }
 
 // fidState tracks the server-side state of a fid.
@@ -310,16 +323,24 @@ func (c *conn) tstat(tx *plan9.Fcall) *plan9.Fcall {
 
 func main() {
 	flag.Parse()
-	ln, err := net.Listen("tcp", *addr)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("synfs: listening on %s", *addr)
-	for {
-		nc, err := ln.Accept()
+
+	if *addr != "" {
+		// TCP mode.
+		ln, err := net.Listen("tcp", *addr)
 		if err != nil {
 			log.Fatal(err)
 		}
-		go newConn(nc).serve()
+		log.Printf("synfs: listening on %s", *addr)
+		for {
+			nc, err := ln.Accept()
+			if err != nil {
+				log.Fatal(err)
+			}
+			go newConn(nc).serve()
+		}
 	}
+
+	// Pipe mode: serve 9P on stdin/stdout.
+	// Use with: mount {synfs} /n/synfs
+	newConn(stdioRWC{}).serve()
 }
