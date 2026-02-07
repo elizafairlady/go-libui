@@ -192,30 +192,40 @@ func (r *Renderer) TagType(id string, key rune) {
 
 	switch {
 	case key == draw.Kbs: // backspace
-		if ts.Frame.P0 > 0 {
-			if ts.Frame.P0 == ts.Frame.P1 {
-				ts.Frame.P0--
+		q0, q1 := ts.Frame.P0, ts.Frame.P1
+		if q0 == q1 {
+			if q0 == 0 {
+				return
 			}
-			ts.Frame.Delete(ts.Frame.P0, ts.Frame.P1)
-			// Update text buffer
-			ts.Text = append(ts.Text[:ts.Frame.P0], ts.Text[ts.Frame.P1:]...)
+			q0--
 		}
+		// Update text buffer BEFORE frame.Delete changes P0/P1
+		newText := make([]rune, 0, len(ts.Text))
+		newText = append(newText, ts.Text[:q0]...)
+		newText = append(newText, ts.Text[q1:]...)
+		ts.Text = newText
+		ts.Frame.Delete(q0, q1)
+
 	case key >= 32 && key < draw.KF: // printable
-		r := []rune{key}
+		q0, q1 := ts.Frame.P0, ts.Frame.P1
 		// Delete selection first if any
-		if ts.Frame.P0 != ts.Frame.P1 {
-			ts.Text = append(ts.Text[:ts.Frame.P0], ts.Text[ts.Frame.P1:]...)
-			ts.Frame.Delete(ts.Frame.P0, ts.Frame.P1)
+		if q0 != q1 {
+			newText := make([]rune, 0, len(ts.Text))
+			newText = append(newText, ts.Text[:q0]...)
+			newText = append(newText, ts.Text[q1:]...)
+			ts.Text = newText
+			ts.Frame.Delete(q0, q1)
 		}
-		pos := ts.Frame.P0
+		pos := q0
 		// Insert into text buffer
+		ch := []rune{key}
 		newText := make([]rune, 0, len(ts.Text)+1)
 		newText = append(newText, ts.Text[:pos]...)
-		newText = append(newText, r...)
+		newText = append(newText, ch...)
 		newText = append(newText, ts.Text[pos:]...)
 		ts.Text = newText
 		// Insert into frame
-		ts.Frame.Insert(r, pos)
+		ts.Frame.Insert(ch, pos)
 	}
 }
 
