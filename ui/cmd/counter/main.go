@@ -2,7 +2,7 @@
 //
 // It displays a counter with increment/decrement buttons,
 // a text input, and a checkbox — demonstrating the full
-// framework: view trees, state, actions, bindings.
+// framework with an Acme-inspired visual style.
 //
 // Usage: counter
 // Quit with DEL key.
@@ -21,31 +21,55 @@ type counterApp struct{}
 
 func (a *counterApp) View(s view.State) *view.Node {
 	count, _ := strconv.Atoi(s.Get("count"))
+	name := s.Get("name")
 
 	return view.VBox("root",
-		view.TextNode("title", "Counter Demo").Prop("bg", "paleblue").PropInt("pad", 8),
-		view.HBox("counter",
-			view.Button("dec", "-").Prop("on", "dec").PropInt("minw", 40),
-			view.TextNode("count", strconv.Itoa(count)).PropInt("pad", 8).PropInt("minw", 60),
-			view.Button("inc", "+").Prop("on", "inc").PropInt("minw", 40),
-		).PropInt("gap", 4).PropInt("pad", 4),
-		view.HBox("input-row",
-			view.TextNode("label", "Name:").PropInt("pad", 4),
-			view.TextBox("name").Prop("bind", "name").Prop("placeholder", "type here...").Prop("flex", "1"),
-		).PropInt("gap", 4).PropInt("pad", 4),
-		view.TextNode("greeting", greeting(s.Get("name"))).PropInt("pad", 4),
-		view.Checkbox("agree", "I agree", s.Get("agree") == "1").Prop("bind", "agree"),
-		view.Spacer("sp"),
-		view.TextNode("help", "Tab to navigate, Enter to click, DEL to quit").
-			Prop("fg", "greyblue").PropInt("pad", 4),
-	).PropInt("pad", 4).PropInt("gap", 2)
+		// Tag bar — Acme-style pale cyan header with controls
+		view.HBox("tag",
+			view.TextNode("tag-title", "Counter").PropInt("pad", 6),
+			view.Spacer("tag-sp"),
+			view.Button("dec", " − ").Prop("on", "dec"),
+			view.TextNode("count-display", " "+strconv.Itoa(count)+" ").
+				PropInt("pad", 6).PropInt("minw", 40),
+			view.Button("inc", " + ").Prop("on", "inc"),
+		).Prop("bg", "acmetag").PropInt("pad", 2).PropInt("gap", 2),
+
+		// Thin separator
+		view.Rect("sep1").Prop("bg", "acmeborder").PropInt("minh", 1).PropInt("maxh", 1),
+
+		// Body content
+		view.VBox("body",
+			// Name input row
+			view.HBox("input-row",
+				view.TextNode("label", "Name").PropInt("pad", 6),
+				view.TextBox("name").Prop("bind", "name").
+					Prop("placeholder", "type a name...").
+					Prop("flex", "1"),
+			).PropInt("gap", 6).PropInt("pad", 2),
+
+			// Greeting (only shown when name is set)
+			greetingNode(name),
+
+			// Checkbox
+			view.Checkbox("agree", "I agree to the terms", s.Get("agree") == "1").
+				Prop("bind", "agree"),
+
+			// Flexible space pushes footer down
+			view.Spacer("body-sp"),
+
+			// Footer hint
+			view.TextNode("help", "Tab ↹ navigate · Enter ↵ click · DEL quit").
+				Prop("fg", "acmedim").PropInt("pad", 4),
+		).Prop("flex", "1").PropInt("pad", 6).PropInt("gap", 6),
+	).PropInt("pad", 0).PropInt("gap", 0)
 }
 
-func greeting(name string) string {
+func greetingNode(name string) *view.Node {
 	if name == "" {
-		return ""
+		return view.TextNode("greeting", "").PropInt("minh", 0).PropInt("maxh", 0)
 	}
-	return "Hello, " + name + "!"
+	return view.TextNode("greeting", "Hello, "+name+"!").
+		Prop("bg", "acmehigh").PropInt("pad", 6)
 }
 
 func (a *counterApp) Handle(s view.State, act *proto.Action) {

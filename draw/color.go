@@ -29,6 +29,20 @@ const (
 	DPalegreyblue  = 0x4993DDFF
 	DPurpleblue    = 0x8888CCFF
 
+	// Acme-inspired UI colors
+	DAcmeYellow  = 0xFFFFEAFF // warm cream body background
+	DAcmeCyan    = 0xEAFFFFFF // pale cyan tag bar
+	DAcmeGreen   = 0xE6FFE6FF // very pale green for success/ok
+	DAcmeHigh    = 0xDDEEDDFF // muted green selection highlight
+	DAcmeTag     = 0xEAFFFFFF // tag bar background
+	DAcmeBorder  = 0x888888FF // subtle grey border
+	DAcmeText    = 0x333333FF // soft black for text
+	DAcmeDim     = 0x999999FF // dimmed/placeholder text
+	DAcmeFocus   = 0x4488CCFF // calm blue for focus
+	DAcmeButton  = 0xF0F0F0FF // light grey button background
+	DAcmePressed = 0xDDDDDDFF // pressed button
+	DAcmeInput   = 0xFFFFFEFF // near-white input background
+
 	DNotacolor = 0xFFFFFF00
 	DNofill    = DNotacolor
 )

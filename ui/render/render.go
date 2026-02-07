@@ -157,22 +157,31 @@ func (r *Renderer) paintButton(n *layout.RNode) {
 	fg := r.Theme.ButtonFgImage
 	bord := r.Theme.BorderImage
 
-	// Hover effect
+	// Hover effect — subtle highlight
 	if n.ID == r.Hover {
 		bg = r.Theme.HighImage
 	}
 
+	// Fill background
 	r.Screen.Draw(n.Rect, bg, draw.ZP)
+
+	// 1px border
 	r.Screen.Border(n.Rect, r.Theme.BorderW, bord, draw.ZP)
 
+	// Focus: draw a subtle left accent line instead of full border
 	if n.ID == r.Focus {
-		inner := n.Rect.Inset(r.Theme.BorderW)
-		r.Screen.Border(inner, r.Theme.FocusRingW, r.Theme.FocusRingImage, draw.ZP)
+		accent := draw.Rect(n.Rect.Min.X, n.Rect.Min.Y, n.Rect.Min.X+2, n.Rect.Max.Y)
+		r.Screen.Draw(accent, r.Theme.FocusRingImage, draw.ZP)
 	}
 
-	pad := propInt(n.Props, "pad", r.Theme.Pad) + 2
-	pt := draw.Pt(n.Rect.Min.X+pad, n.Rect.Min.Y+pad)
-	r.Screen.StringBg(pt, fg, draw.ZP, r.Font, text, bg, draw.ZP)
+	// Center text vertically
+	tw := r.Font.StringWidth(text)
+	tx := n.Rect.Min.X + (n.Rect.Dx()-tw)/2
+	ty := n.Rect.Min.Y + (n.Rect.Dy()-r.Font.Height)/2
+	if tx < n.Rect.Min.X+2 {
+		tx = n.Rect.Min.X + 2
+	}
+	r.Screen.StringBg(draw.Pt(tx, ty), fg, draw.ZP, r.Font, text, bg, draw.ZP)
 }
 
 func (r *Renderer) paintCheckbox(n *layout.RNode) {
@@ -214,30 +223,38 @@ func (r *Renderer) paintTextbox(n *layout.RNode) {
 	display := text
 	if display == "" && placeholder != "" {
 		display = placeholder
-		// Gray placeholder
-		fg = r.Theme.BorderImage
+		// Dimmed placeholder using a lighter color
+		dimCol := r.colorImage(draw.DAcmeDim)
+		if dimCol != nil {
+			fg = dimCol
+		} else {
+			fg = r.Theme.BorderImage
+		}
 	}
 
-	pt := draw.Pt(n.Rect.Min.X+pad+1, n.Rect.Min.Y+pad+1)
+	// Vertically center text
+	ty := n.Rect.Min.Y + (n.Rect.Dy()-r.Font.Height)/2
+	pt := draw.Pt(n.Rect.Min.X+pad+1, ty)
 	if display != "" {
 		r.Screen.StringBg(pt, fg, draw.ZP, r.Font, display, r.Theme.InputBgImage, draw.ZP)
 	}
 
 	// Draw cursor if focused
-	if n.ID == r.Focus && text != "" {
-		cursorPos := propInt(n.Props, "cursor", len([]rune(text)))
-		ctext := string([]rune(text)[:cursorPos])
-		cx := pt.X + r.Font.StringWidth(ctext)
-		cy := pt.Y
-		r.Screen.Draw(draw.Rect(cx, cy, cx+2, cy+r.Font.Height), r.Theme.FgImage, draw.ZP)
-	} else if n.ID == r.Focus && text == "" {
+	if n.ID == r.Focus {
 		cx := pt.X
-		cy := pt.Y
-		r.Screen.Draw(draw.Rect(cx, cy, cx+2, cy+r.Font.Height), r.Theme.FgImage, draw.ZP)
+		if text != "" {
+			cursorPos := propInt(n.Props, "cursor", len([]rune(text)))
+			ctext := string([]rune(text)[:cursorPos])
+			cx += r.Font.StringWidth(ctext)
+		}
+		// Thin 1px cursor
+		r.Screen.Draw(draw.Rect(cx, pt.Y, cx+1, pt.Y+r.Font.Height), r.Theme.FgImage, draw.ZP)
 	}
 
+	// Focus: bottom accent line
 	if n.ID == r.Focus {
-		r.Screen.Border(n.Rect, r.Theme.FocusRingW, r.Theme.FocusRingImage, draw.ZP)
+		bot := draw.Rect(n.Rect.Min.X, n.Rect.Max.Y-2, n.Rect.Max.X, n.Rect.Max.Y)
+		r.Screen.Draw(bot, r.Theme.FocusRingImage, draw.ZP)
 	}
 }
 

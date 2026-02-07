@@ -47,29 +47,30 @@ type Theme struct {
 	FocusRingImage *draw.Image
 }
 
-// Default returns the default Plan 9 inspired theme.
+// Default returns the default Acme-inspired theme.
+// Warm cream background, subtle grey borders, calm blue accents.
 func Default() *Theme {
 	return &Theme{
-		Background: draw.DPaleyellow,
-		Foreground: draw.DBlack,
-		Highlight:  draw.DDarkyellow,
-		HighText:   draw.DBlack,
-		Border:     draw.DBlack,
-		ButtonBg:   draw.DPaleblue,
-		ButtonFg:   draw.DBlack,
-		InputBg:    draw.DWhite,
-		InputFg:    draw.DBlack,
-		FocusRing:  draw.DBlue,
+		Background: draw.DAcmeYellow,
+		Foreground: draw.DAcmeText,
+		Highlight:  draw.DAcmeHigh,
+		HighText:   draw.DAcmeText,
+		Border:     draw.DAcmeBorder,
+		ButtonBg:   draw.DAcmeButton,
+		ButtonFg:   draw.DAcmeText,
+		InputBg:    draw.DAcmeInput,
+		InputFg:    draw.DAcmeText,
+		FocusRing:  draw.DAcmeFocus,
 
 		FontName:     "",
 		BoldFontName: "",
 
-		Pad:        4,
-		Gap:        2,
+		Pad:        6,
+		Gap:        4,
 		BorderW:    1,
 		Radius:     0,
-		FocusRingW: 2,
-		ScrollW:    12,
+		FocusRingW: 1,
+		ScrollW:    10,
 	}
 }
 
@@ -146,6 +147,24 @@ func ParseColor(s string) uint32 {
 		return draw.DPaleblue
 	case "greyblue":
 		return draw.DGreyblue
+	case "acmeyellow":
+		return draw.DAcmeYellow
+	case "acmecyan", "acmetag":
+		return draw.DAcmeCyan
+	case "acmeborder":
+		return draw.DAcmeBorder
+	case "acmetext":
+		return draw.DAcmeText
+	case "acmedim":
+		return draw.DAcmeDim
+	case "acmefocus":
+		return draw.DAcmeFocus
+	case "acmebutton":
+		return draw.DAcmeButton
+	case "acmeinput":
+		return draw.DAcmeInput
+	case "acmehigh":
+		return draw.DAcmeHigh
 	}
 	// Try hex
 	if len(s) > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
