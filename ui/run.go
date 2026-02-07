@@ -204,17 +204,15 @@ func Run(title string, app view.App) error {
 			}
 
 			// Tag typing — editable tag bar
+			// Tags are renderer-owned; typing doesn't go through UIFS.
+			// Only flush the display after frame.Insert/Delete draws.
 			if u.Focus != "" {
 				tree := u.Tree()
 				if tree != nil {
 					node := tree.Nodes[u.Focus]
 					if node != nil && node.Type == "tag" {
 						r.TagType(u.Focus, key)
-						// Emit input action with updated tag text
-						tagText := r.TagText(u.Focus)
-						act := render.InputAction(u.Focus, tagText, len([]rune(tagText)))
-						u.HandleAction(act)
-						repaint()
+						d.Flush()
 						continue
 					}
 				}

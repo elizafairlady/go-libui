@@ -91,26 +91,42 @@ func (r *Renderer) tagColors() [frame.NCol]*draw.Image {
 func (r *Renderer) paintTag(n *layout.RNode) {
 	ts := r.ensureTag(n.ID)
 
-	// Get text from node props
-	text := n.Props["text"]
-	newRunes := []rune(text)
+	// Only set initial text from tree props on first init.
+	// After that, renderer owns the tag text (user-editable).
+	if !ts.Init {
+		text := n.Props["text"]
+		ts.Text = []rune(text)
+	}
 
-	// Check if text or rect changed — reinit if so
-	if !ts.Init || ts.Rect != n.Rect || !runesEqual(ts.Text, newRunes) {
-		ts.Text = newRunes
+	// First time or rect changed: full init
+	if !ts.Init || ts.Rect != n.Rect {
+		p0, p1 := ts.Frame.P0, ts.Frame.P1
 		ts.Frame.Clear(false)
 		r.initTag(ts, n)
+		// Restore selection
+		if ts.Frame.Nchars > 0 {
+			if p0 > ts.Frame.Nchars {
+				p0 = ts.Frame.Nchars
+			}
+			if p1 > ts.Frame.Nchars {
+				p1 = ts.Frame.Nchars
+			}
+			ts.Frame.P0, ts.Frame.P1 = p0, p1
+		}
+	} else {
+		// Frame is already correct — just redraw its content
+		// (The full-screen paint cleared our pixels, so we need to repaint)
+		tagBg := r.colorImage(draw.DAcmeCyan)
+		if tagBg != nil {
+			r.Screen.Draw(n.Rect, tagBg, draw.ZP)
+		}
+		ts.Frame.Redraw()
+		// Redraw selection highlight if any
+		if ts.Frame.P0 != ts.Frame.P1 {
+			pt0 := ts.Frame.PtOfChar(ts.Frame.P0)
+			ts.Frame.DrawSel(pt0, ts.Frame.P0, ts.Frame.P1, true)
+		}
 	}
-
-	// Draw the tag background
-	tagBg := r.colorImage(draw.DAcmeCyan)
-	if tagBg != nil {
-		r.Screen.Draw(n.Rect, tagBg, draw.ZP)
-	}
-
-	// Reinit and redraw frame
-	ts.Frame.Clear(false)
-	r.initTag(ts, n)
 
 	// Draw bottom border
 	bord := r.colorImage(draw.DAcmeBorder)
