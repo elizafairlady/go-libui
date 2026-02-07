@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"image"
 	"os"
-	"strings"
 )
 
 // DrawContext wraps /dev/draw primitives minimally.
@@ -13,8 +12,7 @@ type DrawContext struct {
 	ctl      *os.File
 	data     *os.File
 	connID   int
-	screenID int // the display image id (id 0)
-	winID    int // our window image id (from namedimage)
+	screenID int // the display/window image id (id 0)
 	Screen   image.Rectangle
 	fontH    int
 	charW    int
@@ -77,24 +75,6 @@ func NewDrawContext() (*DrawContext, error) {
 	// Start allocating IDs after the screen ID
 	ctx.nextID = ctx.screenID + 1
 
-	// Read window name from /dev/winname and get the window image
-	winname, err := readWinname()
-	if err == nil && winname != "" {
-		// Use 'n' message to look up the named window image
-		ctx.winID = ctx.nextID
-		ctx.nextID++
-		if err := ctx.namedImage(ctx.winID, winname); err != nil {
-			// If namedimage fails, fall back to screen
-			ctx.winID = ctx.screenID
-		} else {
-			// Read window dimensions from the allocated image
-			ctx.readImageInfo(ctx.winID)
-		}
-	} else {
-		// No window name, use display image directly
-		ctx.winID = ctx.screenID
-	}
-
 	// Allocate white and black color images
 	ctx.white = ctx.nextID
 	ctx.nextID++
@@ -111,60 +91,6 @@ func NewDrawContext() (*DrawContext, error) {
 	}
 
 	return ctx, nil
-}
-
-func readWinname() (string, error) {
-	f, err := os.Open("/dev/winname")
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	buf := make([]byte, 256)
-	n, err := f.Read(buf)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(buf[:n])), nil
-}
-
-// namedImage sends the 'n' message to look up a named image
-// n id[4] j[1] name[j]
-func (c *DrawContext) namedImage(id int, name string) error {
-	nameBytes := []byte(name)
-	if len(nameBytes) > 255 {
-		nameBytes = nameBytes[:255]
-	}
-
-	buf := make([]byte, 1+4+1+len(nameBytes))
-	buf[0] = 'n'
-	putlong(buf[1:], uint32(id))
-	buf[5] = byte(len(nameBytes))
-	copy(buf[6:], nameBytes)
-
-	_, err := c.data.Write(buf)
-	if err != nil {
-		return err
-	}
-
-	// Read response - need to read back the image info
-	// The response comes as data that we need to interpret
-	return nil
-}
-
-// readImageInfo reads image info by querying via 'I' message or re-reading ctl
-func (c *DrawContext) readImageInfo(id int) {
-	// Re-read ctl to get updated info for this image
-	buf := make([]byte, 12*12)
-	c.ctl.Seek(0, 0)
-	n, err := c.ctl.Read(buf)
-	if err != nil || n < 12*8 {
-		return
-	}
-	c.Screen.Min.X = atoi(string(buf[4*12 : 5*12]))
-	c.Screen.Min.Y = atoi(string(buf[5*12 : 6*12]))
-	c.Screen.Max.X = atoi(string(buf[6*12 : 7*12]))
-	c.Screen.Max.Y = atoi(string(buf[7*12 : 8*12]))
 }
 
 // allocColor allocates a 1x1 replicated image filled with the given color.
@@ -227,10 +153,10 @@ func (c *DrawContext) Clear() {
 	r := c.Screen
 	buf := make([]byte, 1+4+4+4+16+8+8)
 	buf[0] = 'd'
-	putlong(buf[1:], uint32(c.winID))  // dst = our window
-	putlong(buf[5:], uint32(c.white))  // src = white
-	putlong(buf[9:], uint32(c.white))  // mask = white (opaque)
-	putlong(buf[13:], uint32(r.Min.X)) // dstr
+	putlong(buf[1:], uint32(c.screenID)) // dst = screen
+	putlong(buf[5:], uint32(c.white))    // src = white
+	putlong(buf[9:], uint32(c.white))    // mask = white (opaque)
+	putlong(buf[13:], uint32(r.Min.X))   // dstr
 	putlong(buf[17:], uint32(r.Min.Y))
 	putlong(buf[21:], uint32(r.Max.X))
 	putlong(buf[25:], uint32(r.Max.Y))
@@ -266,7 +192,7 @@ func (c *DrawContext) Text(x, y int, s string) {
 		// Draw a small filled rectangle for each char
 		buf := make([]byte, 1+4+4+4+16+8+8)
 		buf[0] = 'd'
-		putlong(buf[1:], uint32(c.winID))
+		putlong(buf[1:], uint32(c.screenID))
 		putlong(buf[5:], uint32(c.black))
 		putlong(buf[9:], uint32(c.black))
 		putlong(buf[13:], uint32(charX+1))
