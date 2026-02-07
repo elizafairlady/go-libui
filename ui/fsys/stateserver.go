@@ -17,8 +17,8 @@ package fsys
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
-	"net"
 	"os"
 	"sort"
 	"strings"
@@ -108,25 +108,35 @@ func (s *StateServer) Serve(rwc io.ReadWriteCloser) {
 	}
 }
 
-// ListenAndServe starts a Unix socket listener at the given path.
-func (s *StateServer) ListenAndServe(path string) error {
-	// Ensure directory exists
-	dir := path[:strings.LastIndex(path, "/")]
-	os.MkdirAll(dir, 0700)
-	os.Remove(path)
-	ln, err := net.Listen("unix", path)
+// Post posts the 9P server to /srv/<name> so clients can mount it.
+// This is the Plan 9 way: create a pipe, post one end to /srv,
+// serve 9P on the other end.
+func (s *StateServer) Post(name string) error {
+	r, w, err := os.Pipe()
 	if err != nil {
-		return err
+		return fmt.Errorf("pipe: %w", err)
 	}
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go s.Serve(conn)
-		}
-	}()
+
+	// Post the read end to /srv
+	srvPath := "/srv/" + name
+	os.Remove(srvPath)
+	f, err := os.Create(srvPath)
+	if err != nil {
+		r.Close()
+		w.Close()
+		return fmt.Errorf("create %s: %w", srvPath, err)
+	}
+	_, err = fmt.Fprintf(f, "%d", r.Fd())
+	f.Close()
+	if err != nil {
+		r.Close()
+		w.Close()
+		return fmt.Errorf("post %s: %w", srvPath, err)
+	}
+	r.Close() // kernel has the fd now
+
+	// Serve on the write end
+	go s.Serve(w)
 	return nil
 }
 

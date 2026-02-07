@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/elizafairlady/go-libui/ui/fsys"
@@ -10,14 +9,10 @@ import (
 	"github.com/elizafairlady/go-libui/ui/uifs"
 )
 
-// uiSocketPath returns the Unix socket path for the 9P state server.
-// The socket lives at /tmp/ns.$USER/ui.<title>.
-func uiSocketPath(title string) string {
-	user := os.Getenv("USER")
-	if user == "" {
-		user = "unknown"
-	}
-	// Sanitize title for use as filename
+// uiSrvName returns the /srv name for the 9P state server.
+// The name is "ui.<title>" posted to /srv.
+func uiSrvName(title string) string {
+	// Sanitize title for use as /srv filename
 	safe := strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
 			return r
@@ -27,7 +22,7 @@ func uiSocketPath(title string) string {
 	if safe == "" {
 		safe = "app"
 	}
-	return fmt.Sprintf("/tmp/ns.%s/ui.%s", user, strings.ToLower(safe))
+	return fmt.Sprintf("ui.%s", strings.ToLower(safe))
 }
 
 // stateProvider adapts the UIFS and Renderer into the

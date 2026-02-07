@@ -52,11 +52,11 @@ func Run(title string, app view.App) error {
 		r.BufferProvider = bp
 	}
 
-	// Start the 9P state server
+	// Start the 9P state server — post to /srv so clients can mount it
 	prov := &stateProvider{u: u, r: r}
 	srv := fsys.NewStateServer(prov)
-	sockPath := uiSocketPath(title)
-	if err := srv.ListenAndServe(sockPath); err != nil {
+	srvName := uiSrvName(title)
+	if err := srv.Post(srvName); err != nil {
 		// Non-fatal: log and continue without 9P
 		fmt.Fprintf(os.Stderr, "ui: 9P server: %v\n", err)
 	}
