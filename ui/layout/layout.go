@@ -174,6 +174,15 @@ func Measure(n *RNode, conf *Config) {
 		n.MinW = max(w, minw)
 		n.MinH = max(h, minh)
 
+	case "tag":
+		// Tag is a text frame — needs at least one line height
+		text := n.Props["text"]
+		w, _ := measureText(conf, n.Props, text)
+		w += pad * 2
+		h := conf.FontHeight + pad*2 // one line minimum
+		n.MinW = max(w, minw)
+		n.MinH = max(h, minh)
+
 	case "rect":
 		n.MinW = max(minw, 1)
 		n.MinH = max(minh, 1)
@@ -383,7 +392,7 @@ func HitTest(n *RNode, pt draw.Point) *RNode {
 
 func isInteractive(n *RNode) bool {
 	switch n.Type {
-	case "button", "checkbox", "textbox", "row":
+	case "button", "checkbox", "textbox", "tag", "row":
 		return true
 	}
 	return n.Props["focusable"] == "1"

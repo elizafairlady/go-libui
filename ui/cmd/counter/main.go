@@ -1,11 +1,11 @@
 // Counter is a minimal example app using the ui framework.
 //
-// It displays a counter with increment/decrement buttons,
-// a text input, and a checkbox — demonstrating the full
-// framework with an Acme-inspired visual style.
+// It demonstrates Acme-style interaction: the tag bar at the top
+// is a real editable text frame. Middle-click (B2) on a command
+// word to execute it (Inc, Dec, Reset, Del).
 //
 // Usage: counter
-// Quit with DEL key.
+// B2 on "Del" in the tag to quit.
 package main
 
 import (
@@ -24,21 +24,18 @@ func (a *counterApp) View(s view.State) *view.Node {
 	name := s.Get("name")
 
 	return view.VBox("root",
-		// Tag bar — Acme-style pale cyan header with controls
-		view.HBox("tag",
-			view.TextNode("tag-title", "Counter").PropInt("pad", 6),
-			view.Spacer("tag-sp"),
-			view.Button("dec", " − ").Prop("on", "dec"),
-			view.TextNode("count-display", " "+strconv.Itoa(count)+" ").
-				PropInt("pad", 6).PropInt("minw", 40),
-			view.Button("inc", " + ").Prop("on", "inc"),
-		).Prop("bg", "acmetag").PropInt("pad", 2).PropInt("gap", 2),
+		// Acme-style tag bar — editable, B2 on words executes them
+		view.Tag("tag", "Counter Inc Dec Reset Del").PropInt("pad", 2),
 
 		// Thin separator
 		view.Rect("sep1").Prop("bg", "acmeborder").PropInt("minh", 1).PropInt("maxh", 1),
 
 		// Body content
 		view.VBox("body",
+			// Count display
+			view.TextNode("count-display", "Count: "+strconv.Itoa(count)).
+				PropInt("pad", 6),
+
 			// Name input row
 			view.HBox("input-row",
 				view.TextNode("label", "Name").PropInt("pad", 6),
@@ -58,7 +55,7 @@ func (a *counterApp) View(s view.State) *view.Node {
 			view.Spacer("body-sp"),
 
 			// Footer hint
-			view.TextNode("help", "Tab ↹ navigate · Enter ↵ click · DEL quit").
+			view.TextNode("help", "B1 select · B2 execute · B3 look · Tab ↹ navigate").
 				Prop("fg", "acmedim").PropInt("pad", 4),
 		).Prop("flex", "1").PropInt("pad", 6).PropInt("gap", 6),
 	).PropInt("pad", 0).PropInt("gap", 0)
@@ -74,14 +71,23 @@ func greetingNode(name string) *view.Node {
 
 func (a *counterApp) Handle(s view.State, act *proto.Action) {
 	switch act.Kind {
-	case "click":
-		switch act.KVs["action"] {
-		case "inc":
+	case "execute":
+		// B2 on tag word
+		switch act.KVs["text"] {
+		case "Inc":
 			n, _ := strconv.Atoi(s.Get("count"))
 			s.Set("count", strconv.Itoa(n+1))
-		case "dec":
+		case "Dec":
 			n, _ := strconv.Atoi(s.Get("count"))
 			s.Set("count", strconv.Itoa(n-1))
+		case "Reset":
+			s.Set("count", "0")
+			s.Set("name", "")
+			s.Set("agree", "0")
+		case "Del":
+			// Signal quit — for now just set a state flag
+			// (In real usage, the framework would handle "Del" specially)
+			s.Set("_quit", "1")
 		}
 	}
 }

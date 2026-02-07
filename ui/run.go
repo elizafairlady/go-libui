@@ -106,16 +106,26 @@ func Run(title string, app view.App) error {
 					u.SetFocus(hit.ID)
 					r.Focus = hit.ID
 				}
-				// Generate action
+				// Determine button
 				button := 1
 				if m.Buttons&2 != 0 {
 					button = 2
 				} else if m.Buttons&4 != 0 {
 					button = 3
 				}
-				act := render.MouseAction(hit, button, m.Point)
-				if act != nil {
-					u.HandleAction(act)
+
+				// Tag nodes get special handling
+				if hit.Type == "tag" {
+					mc.Mouse = m
+					act := r.TagClick(hit.ID, mc, button)
+					if act != nil {
+						u.HandleAction(act)
+					}
+				} else {
+					act := render.MouseAction(hit, button, m.Point)
+					if act != nil {
+						u.HandleAction(act)
+					}
 				}
 			}
 			repaint()
@@ -186,6 +196,23 @@ func Run(title string, app view.App) error {
 								"value": v,
 							},
 						}
+						u.HandleAction(act)
+						repaint()
+						continue
+					}
+				}
+			}
+
+			// Tag typing — editable tag bar
+			if u.Focus != "" {
+				tree := u.Tree()
+				if tree != nil {
+					node := tree.Nodes[u.Focus]
+					if node != nil && node.Type == "tag" {
+						r.TagType(u.Focus, key)
+						// Emit input action with updated tag text
+						tagText := r.TagText(u.Focus)
+						act := render.InputAction(u.Focus, tagText, len([]rune(tagText)))
 						u.HandleAction(act)
 						repaint()
 						continue

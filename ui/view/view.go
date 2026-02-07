@@ -134,6 +134,12 @@ func Row(id string, children ...*Node) *Node {
 	return N(id, "row").Child(children...)
 }
 
+// Tag creates an Acme-style editable tag bar.
+// The text contains command words that can be B2-executed.
+func Tag(id, text string) *Node {
+	return N(id, "tag").Text(text).Prop("focusable", "1")
+}
+
 // --- Serialization ---
 
 // Serialize converts the node tree to a proto.Tree for the protocol.

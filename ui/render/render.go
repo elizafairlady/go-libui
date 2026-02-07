@@ -25,6 +25,9 @@ type Renderer struct {
 	Hover     string         // hovered node ID
 	ScrollOff map[string]int // scroll offsets by node ID
 
+	// Tag frames (Acme-style editable tag bars)
+	Tags map[string]*TagState
+
 	// Cached color images
 	colors map[uint32]*draw.Image
 }
@@ -84,6 +87,8 @@ func (r *Renderer) paintNode(n *layout.RNode) {
 		r.paintCheckbox(n)
 	case "textbox":
 		r.paintTextbox(n)
+	case "tag":
+		r.paintTag(n)
 	case "vbox", "hbox", "stack", "row", "scroll", "spacer":
 		r.paintContainer(n)
 	default:
@@ -414,7 +419,7 @@ func isFocusable(n *layout.RNode) bool {
 		return true
 	}
 	switch n.Type {
-	case "button", "checkbox", "textbox":
+	case "button", "checkbox", "textbox", "tag":
 		return true
 	}
 	return false
