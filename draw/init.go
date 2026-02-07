@@ -55,6 +55,11 @@ func geninitdraw(devdir string, errfn func(string), fontname, label, windir stri
 		d.ctlfd.Close()
 		return nil, fmt.Errorf("initdraw: short read from ctl: %d bytes", n)
 	}
+	// Detect new-style display: if ctl returns fewer than NINFO+1 bytes
+	// Port of 9front: if(n < NINFO) isnew = 1;
+	if n < 12*12+1 {
+		d.isnew = true
+	}
 
 	// Parse the control reply
 	// Format: dirno[12] ?[12] chan[12] repl[12] r.min.x[12] r.min.y[12] r.max.x[12] r.max.y[12] clipr.min.[12]x clipr.min.y[12] clipr.max.x[12] clipr.max.y[12]
@@ -146,6 +151,15 @@ func geninitdraw(devdir string, errfn func(string), fontname, label, windir stri
 		}
 	}
 
+	// Get the window image — this is what programs draw to.
+	// Port of the gengetwindow() call in 9front geninitdraw().
+	// Without this, d.ScreenImage would be nil and programs would
+	// draw to d.Image (the raw display), overwriting rio.
+	if err := d.GetWindow(Refnone); err != nil {
+		// If getwindow fails (e.g. no rio), fall back to display image
+		d.ScreenImage = d.Image
+	}
+
 	return d, nil
 }
 
@@ -202,9 +216,15 @@ func (d *Display) doflush() error {
 
 func (d *Display) flush(visible bool) error {
 	if visible {
-		// Add 'v' command for visible flush
+		// Add 'v' command for visible flush.
+		// For new-style displays, also send the screenimage id.
+		// Port of 9front flushimage(): if(d->_isnewdisplay){ BPLONG(..., d->screenimage->id) }
 		d.buf[d.bufp] = 'v'
 		d.bufp++
+		if d.isnew && d.ScreenImage != nil {
+			bplong(d.buf[d.bufp:], uint32(d.ScreenImage.id))
+			d.bufp += 4
+		}
 	}
 	return d.doflush()
 }

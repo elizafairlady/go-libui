@@ -261,6 +261,7 @@ type Display struct {
 	dirno       int     // directory number in /dev/draw
 	Image       *Image  // the display memory
 	Screen      *Screen // the window's screen (for window images)
+	screen      *Screen // internal _screen for gengetwindow
 	ScreenImage *Image  // the screen image (may be window or display)
 	Windows     *Image  // the window (for rio)
 	White       *Image  // white

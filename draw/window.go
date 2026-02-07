@@ -3,49 +3,33 @@ package draw
 import (
 	"fmt"
 	"os"
-	"strconv"
+	"strings"
 )
 
-// AllocScreen allocates a new screen on image with fill color.
-// Port of 9front allocscreen().
-func AllocScreen(image, fill *Image, public bool) (*Screen, error) {
-	d := image.Display
-	if d != fill.Display {
-		return nil, fmt.Errorf("allocscreen: image and fill on different displays")
-	}
-
-	s := &Screen{
-		Display: d,
-		Image:   image,
-		Fill:    fill,
-	}
+// PublicScreen acquires an existing public screen by id and channel format.
+// Port of 9front publicscreen().
+func (d *Display) PublicScreen(id int, pix Pix) (*Screen, error) {
+	s := &Screen{}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.imageid++
-	id := d.imageid
-	s.id = id
-
-	pub := byte(0)
-	if public {
-		pub = 1
-	}
-
-	a, err := d.bufimage(1 + 4 + 4 + 4 + 1)
+	a, err := d.bufimage(1 + 4 + 4)
 	if err != nil {
 		return nil, err
 	}
-	a[0] = 'A'
+	a[0] = 'S'
 	bplong(a[1:], uint32(id))
-	bplong(a[5:], uint32(image.id))
-	bplong(a[9:], uint32(fill.id))
-	a[13] = pub
+	bplong(a[5:], uint32(pix))
 
 	if err := d.doflush(); err != nil {
 		return nil, err
 	}
 
+	s.Display = d
+	s.id = id
+	s.Image = nil
+	s.Fill = nil
 	return s, nil
 }
 
@@ -139,90 +123,171 @@ func (w *Image) OriginWindow(log, scr Point) error {
 	return nil
 }
 
-// GetWindow reads the window image from the display.
-// It is typically called after a resize event.
+// GetWindow reads the window image from the display via winname + namedimage.
+// It is typically called during init and after a resize event.
 // The ref argument specifies the refresh mode: Refbackup, Refnone, or Refmesg.
+//
+// Port of 9front getwindow().
 func (d *Display) GetWindow(ref int) error {
-	return d.gengetwindow("/dev/wctl", ref)
+	winname := fmt.Sprintf("%s/winname", d.windir)
+	return d.gengetwindow(winname, ref)
 }
 
-func (d *Display) gengetwindow(wctlname string, ref int) error {
-	// Read window info from wctl
-	wctl, err := os.Open(wctlname)
+// gengetwindow is the faithful port of 9front gengetwindow().
+//
+// The flow is:
+//  1. Read $windir/winname to get the window image name
+//  2. Call namedimage() to acquire that image from devdraw
+//  3. If no winname (not running under rio), fall back to display image
+//  4. Call allocscreen() on the image
+//  5. Call _allocwindow() with Borderwidth inset
+//  6. Set d.ScreenImage to the window
+func (d *Display) gengetwindow(winnamepath string, ref int) error {
+	var image *Image
+	noborder := false
+
+	fd, err := os.Open(winnamepath)
 	if err != nil {
-		return err
+		// Can't open winname — not running under rio.
+		// Fall back to the raw display image.
+		noborder = true
+		image = d.Image
+	} else {
+		buf := make([]byte, 64)
+		n, err := fd.Read(buf)
+		fd.Close()
+		if err != nil || n <= 0 {
+			noborder = true
+			image = d.Image
+		} else {
+			name := strings.TrimRight(string(buf[:n]), "\n\r \t")
+			if name == "" || name == "noborder" {
+				noborder = true
+				image = d.Image
+			} else {
+				// Look up the named window image from devdraw.
+				// There's a race where winname can change after we read it,
+				// so retry if namedimage fails with a different name.
+				for try := 0; try < 3; try++ {
+					image, err = d.Namedimage(name)
+					if err == nil {
+						break
+					}
+					// Re-read winname and retry
+					fd2, err2 := os.Open(winnamepath)
+					if err2 != nil {
+						break
+					}
+					n, err2 = fd2.Read(buf)
+					fd2.Close()
+					if err2 != nil || n <= 0 {
+						break
+					}
+					newname := strings.TrimRight(string(buf[:n]), "\n\r \t")
+					if newname == name {
+						break // same name, real failure
+					}
+					name = newname
+				}
+				if image == nil {
+					// namedimage failed; fall back
+					d.ScreenImage = nil
+					return fmt.Errorf("getwindow: namedimage %q: %v", name, err)
+				}
+			}
+		}
 	}
-	defer wctl.Close()
 
-	buf := make([]byte, 256)
-	n, err := wctl.Read(buf)
-	if err != nil {
-		return err
+	// Free old screen/window if reattaching
+	if d.screen != nil {
+		if d.ScreenImage != nil {
+			d.ScreenImage.freeimage1()
+		}
+		if d.screen.Image != nil && d.screen.Image != d.Image {
+			d.screen.Image.Free()
+		}
+		d.screen.Free()
+		d.screen = nil
 	}
 
-	// Parse window control line
-	fields := parseCtlLine(string(buf[:n]))
-	if len(fields) < 5 {
-		return fmt.Errorf("bad wctl format")
+	if image == nil {
+		d.ScreenImage = nil
+		return fmt.Errorf("getwindow: no image")
 	}
 
-	minx, _ := strconv.Atoi(fields[1])
-	miny, _ := strconv.Atoi(fields[2])
-	maxx, _ := strconv.Atoi(fields[3])
-	maxy, _ := strconv.Atoi(fields[4])
+	// Set d.ScreenImage to the backing image first
+	d.ScreenImage = image
 
-	r := Rect(minx, miny, maxx, maxy)
-
-	// If we already have a window, free it
-	if d.Windows != nil && d.Windows != d.Image {
-		d.Windows.Free()
-	}
-
+	// Allocate a Screen on this image
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// Re-read ctl to refresh display image dimensions
-	_, err = d.ctlfd.Seek(0, 0)
+	scr, err := d.allocScreenLocked(image, d.White, false)
+	d.mu.Unlock()
 	if err != nil {
-		return err
+		d.ScreenImage = nil
+		if image != d.Image {
+			image.Free()
+		}
+		return fmt.Errorf("getwindow: allocscreen: %v", err)
 	}
-	ctlbuf := make([]byte, 12*12)
-	m, err := d.ctlfd.Read(ctlbuf)
+	d.screen = scr
+
+	// Inset by Borderwidth unless "noborder"
+	r := image.R
+	if !noborder {
+		r = r.Inset(Borderwidth)
+	}
+
+	// Allocate the window (layer) on the screen
+	d.mu.Lock()
+	win, err := d.allocWindow(nil, scr, r, ref, DWhite)
+	d.mu.Unlock()
 	if err != nil {
-		return err
-	}
-	if m < 12*12 {
-		return fmt.Errorf("short ctl read")
-	}
-	ctlfields := parseCtlLine(string(ctlbuf[:m]))
-	if len(ctlfields) < 12 {
-		return fmt.Errorf("malformed ctl")
+		scr.Free()
+		d.screen = nil
+		d.ScreenImage = nil
+		if image != d.Image {
+			image.Free()
+		}
+		return fmt.Errorf("getwindow: allocwindow: %v", err)
 	}
 
-	// Update display image rectangle
-	dminx, _ := strconv.Atoi(ctlfields[3])
-	dminy, _ := strconv.Atoi(ctlfields[4])
-	dmaxx, _ := strconv.Atoi(ctlfields[5])
-	dmaxy, _ := strconv.Atoi(ctlfields[6])
-	clipminx, _ := strconv.Atoi(ctlfields[7])
-	clipminy, _ := strconv.Atoi(ctlfields[8])
-	clipmaxx, _ := strconv.Atoi(ctlfields[9])
-	clipmaxy, _ := strconv.Atoi(ctlfields[10])
-
-	d.Image.R = Rect(dminx, dminy, dmaxx, dmaxy)
-	d.Image.Clipr = Rect(clipminx, clipminy, clipmaxx, clipmaxy)
-
-	// Set Windows to point to the display image with the window rectangle
-	if d.Windows == nil {
-		d.Windows = d.Image
-	}
-	d.Windows.R = r
-	d.Windows.Clipr = r
-
+	// The window IS the screen image that programs draw to
+	d.ScreenImage = win
 	return nil
 }
 
-// Namedimage looks up an image by name.
+// allocScreenLocked is allocscreen with the lock already held.
+func (d *Display) allocScreenLocked(image, fill *Image, public bool) (*Screen, error) {
+	d.imageid++
+	id := d.imageid
+
+	a, err := d.bufimage(1 + 4 + 4 + 4 + 1)
+	if err != nil {
+		return nil, err
+	}
+	a[0] = 'A'
+	bplong(a[1:], uint32(id))
+	bplong(a[5:], uint32(image.id))
+	bplong(a[9:], uint32(fill.id))
+	if public {
+		a[13] = 1
+	} else {
+		a[13] = 0
+	}
+
+	return &Screen{
+		Display: d,
+		id:      id,
+		Image:   image,
+		Fill:    fill,
+	}, nil
+}
+
+// Namedimage looks up an image by name from devdraw.
+// Port of 9front namedimage().
+//
+// This sends the 'n' command to devdraw to bind a local image id
+// to a named (shared) image, then reads back the image properties.
 func (d *Display) Namedimage(name string) (*Image, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -232,6 +297,7 @@ func (d *Display) Namedimage(name string) (*Image, error) {
 		return nil, fmt.Errorf("name too long")
 	}
 
+	// Flush pending data so we don't get error allocating the image
 	if err := d.doflush(); err != nil {
 		return nil, err
 	}
@@ -249,27 +315,39 @@ func (d *Display) Namedimage(name string) (*Image, error) {
 	copy(a[6:], name)
 
 	if err := d.doflush(); err != nil {
+		// Free the id on error
+		d.freeRemoteId(id)
 		return nil, err
 	}
 
-	// Re-read ctl to get image info
+	// Read back image properties from ctl
 	_, err = d.ctlfd.Seek(0, 0)
 	if err != nil {
+		d.freeRemoteId(id)
 		return nil, err
 	}
 
 	buf := make([]byte, 12*12+1)
 	m, err := d.ctlfd.Read(buf)
 	if err != nil {
+		d.freeRemoteId(id)
 		return nil, err
 	}
 	if m < 12*12 {
+		d.freeRemoteId(id)
 		return nil, fmt.Errorf("short read from ctl")
 	}
 
-	chanstr := trimSpace(string(buf[2*12 : 3*12]))
+	fields := parseCtlLine(string(buf[:m]))
+	if len(fields) < 12 {
+		d.freeRemoteId(id)
+		return nil, fmt.Errorf("namedimage: malformed ctl reply")
+	}
+
+	chanstr := fields[2]
 	pix := strtochan(chanstr)
 	if pix == 0 {
+		d.freeRemoteId(id)
 		return nil, fmt.Errorf("bad channel from devdraw: %s", chanstr)
 	}
 
@@ -278,20 +356,27 @@ func (d *Display) Namedimage(name string) (*Image, error) {
 		id:      id,
 		Pix:     pix,
 		Depth:   chantodepth(pix),
+		Repl:    atoi(fields[3]) != 0,
 	}
-
-	fields := parseCtlLine(string(buf[:m]))
-	if len(fields) >= 12 {
-		img.Repl = fields[3] == "1"
-		img.R.Min.X, _ = strconv.Atoi(fields[4])
-		img.R.Min.Y, _ = strconv.Atoi(fields[5])
-		img.R.Max.X, _ = strconv.Atoi(fields[6])
-		img.R.Max.Y, _ = strconv.Atoi(fields[7])
-		img.Clipr.Min.X, _ = strconv.Atoi(fields[8])
-		img.Clipr.Min.Y, _ = strconv.Atoi(fields[9])
-		img.Clipr.Max.X, _ = strconv.Atoi(fields[10])
-		img.Clipr.Max.Y, _ = strconv.Atoi(fields[11])
-	}
+	img.R.Min.X = atoi(fields[4])
+	img.R.Min.Y = atoi(fields[5])
+	img.R.Max.X = atoi(fields[6])
+	img.R.Max.Y = atoi(fields[7])
+	img.Clipr.Min.X = atoi(fields[8])
+	img.Clipr.Min.Y = atoi(fields[9])
+	img.Clipr.Max.X = atoi(fields[10])
+	img.Clipr.Max.Y = atoi(fields[11])
 
 	return img, nil
+}
+
+// freeRemoteId sends an 'f' command to free an image id on the server.
+func (d *Display) freeRemoteId(id int) {
+	a, err := d.bufimage(1 + 4)
+	if err != nil {
+		return
+	}
+	a[0] = 'f'
+	bplong(a[1:], uint32(id))
+	d.doflush()
 }
