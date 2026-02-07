@@ -95,8 +95,8 @@ func redraw() {
 	drawText(x, y)
 	y += 60
 
-	// --- Section: Color palette ---
-	drawColorPalette(x, y, inner.Dx()-20)
+	// --- Section: Truecolor palette with drop shadow ---
+	drawTruecolorPalette(x, y, inner.Dx()-20)
 	y += 50
 
 	// Status bar
@@ -272,29 +272,76 @@ func drawText(x, y int) {
 		"White on dark", darkgreen, draw.ZP)
 }
 
-// drawColorPalette shows the Plan 9 standard color palette.
-func drawColorPalette(x, y, w int) {
+// hsvToRGB converts HSV (h in [0,360), s,v in [0,1]) to 0xRRGGBBFF.
+func hsvToRGB(h, s, v float64) uint32 {
+	c := v * s
+	x := c * (1 - math.Abs(math.Mod(h/60, 2)-1))
+	m := v - c
+	var r, g, b float64
+	switch {
+	case h < 60:
+		r, g, b = c, x, 0
+	case h < 120:
+		r, g, b = x, c, 0
+	case h < 180:
+		r, g, b = 0, c, x
+	case h < 240:
+		r, g, b = 0, x, c
+	case h < 300:
+		r, g, b = x, 0, c
+	default:
+		r, g, b = c, 0, x
+	}
+	ri := uint32((r + m) * 255)
+	gi := uint32((g + m) * 255)
+	bi := uint32((b + m) * 255)
+	return ri<<24 | gi<<16 | bi<<8 | 0xFF
+}
+
+// drawTruecolorPalette draws a truecolor HSV gradient with a drop shadow.
+func drawTruecolorPalette(x, y, w int) {
 	if font != nil {
-		screen.String(draw.Pt(x, y), display.Black, draw.ZP, font, "Color palette (Cmap2rgb):")
+		screen.String(draw.Pt(x, y), display.Black, draw.ZP, font, "Truecolor palette (with drop shadow):")
 		y += font.Height + 2
 	}
 
-	// Draw 16×16 grid of color map entries
-	sz := 12
-	for row := 0; row < 16; row++ {
-		for col := 0; col < 16; col++ {
-			idx := row*16 + col
-			rgba := draw.Cmap2rgba(idx)
-			c, err := display.AllocImage(draw.Rect(0, 0, 1, 1), draw.RGB24, true, uint32(rgba))
+	cols := 180 // hue steps
+	rows := 40  // saturation steps
+	if cols > w {
+		cols = w
+	}
+	pw := 2 // pixel width per cell
+	ph := 2 // pixel height per cell
+	palW := cols * pw
+	palH := rows * ph
+	shadowOff := 4
+
+	// Draw drop shadow — a dark rectangle offset down-right
+	shadow, err := display.AllocImage(draw.Rect(0, 0, 1, 1), draw.RGBA32, true, 0x00000088)
+	if err == nil {
+		shadowR := draw.Rect(x+shadowOff, y+shadowOff, x+palW+shadowOff, y+palH+shadowOff)
+		screen.DrawOp(shadowR, shadow, nil, draw.ZP, draw.SoverD)
+		shadow.Free()
+	}
+
+	// Draw truecolor HSV gradient: hue across X, saturation down Y
+	for col := 0; col < cols; col++ {
+		h := float64(col) * 360.0 / float64(cols)
+		for row := 0; row < rows; row++ {
+			s := 1.0 - float64(row)/float64(rows)
+			rgba := hsvToRGB(h, s, 1.0)
+			c, err := display.AllocImage(draw.Rect(0, 0, 1, 1), draw.RGB24, true, rgba)
 			if err != nil {
 				continue
 			}
-			r := draw.Rect(x+col*(sz+1), y+row*(sz+1),
-				x+col*(sz+1)+sz, y+row*(sz+1)+sz)
+			r := draw.Rect(x+col*pw, y+row*ph, x+col*pw+pw, y+row*ph+ph)
 			screen.Draw(r, c, draw.ZP)
 			c.Free()
 		}
 	}
+
+	// Thin border around the palette
+	screen.Border(draw.Rect(x-1, y-1, x+palW+1, y+palH+1), 1, display.Black, draw.ZP)
 }
 
 // drawStatus draws the status bar at the bottom.
