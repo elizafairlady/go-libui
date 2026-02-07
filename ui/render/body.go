@@ -2,8 +2,8 @@
 //
 // A body is the Acme-style editable text area — a viewport into a
 // potentially large rune buffer. The frame only displays what fits;
-// scrolling adjusts the origin (org). The renderer owns the text buffer
-// and frame state, which persists across view tree rebuilds.
+// scrolling adjusts the origin (org). Text is owned by a window.Buffer,
+// not by the renderer — the renderer is just a view into the buffer.
 //
 // Mouse interaction:
 //   - B1: select (frame.Select)
@@ -22,29 +22,43 @@ import (
 	"github.com/elizafairlady/go-libui/ui/layout"
 	"github.com/elizafairlady/go-libui/ui/proto"
 	"github.com/elizafairlady/go-libui/ui/theme"
+	"github.com/elizafairlady/go-libui/ui/window"
 )
 
-// BodyState holds the state for a body text area.
+// BodyState holds the renderer state for a body text area.
+// Text is owned by Buf (a *window.Buffer), NOT by the renderer.
 type BodyState struct {
 	Frame *frame.Frame
-	Text  []rune         // complete text buffer
+	Buf   *window.Buffer // the authoritative text — owned by Window or standalone
 	Org   int            // first rune visible in frame
 	Rect  draw.Rectangle // current layout rect
 	Init  bool           // has been initialized
-	// Dirty tracks whether the text has been modified since last clean.
-	Dirty bool
+	seq   int            // last seq we synced from buffer
 }
 
 // ensureBody ensures a BodyState exists for the given node ID.
-func (r *Renderer) ensureBody(id string) *BodyState {
+// If a Buffer is provided (from a Window), it's used; otherwise
+// a standalone Buffer is created.
+func (r *Renderer) ensureBody(id string, buf *window.Buffer) *BodyState {
 	if r.Bodies == nil {
 		r.Bodies = make(map[string]*BodyState)
 	}
-	if bs, ok := r.Bodies[id]; ok {
+	bs, ok := r.Bodies[id]
+	if ok {
+		// If buffer changed (e.g. window was replaced), update it
+		if buf != nil && bs.Buf != buf {
+			bs.Buf = buf
+			bs.seq = -1 // force re-sync
+		}
 		return bs
 	}
-	bs := &BodyState{
+	if buf == nil {
+		buf = &window.Buffer{}
+	}
+	bs = &BodyState{
 		Frame: &frame.Frame{},
+		Buf:   buf,
+		seq:   -1,
 	}
 	r.Bodies[id] = bs
 	return bs
@@ -107,27 +121,60 @@ func (r *Renderer) bodyColors(n *layout.RNode) [frame.NCol]*draw.Image {
 
 // bodyFill inserts text from org into the frame up to what fits.
 func (r *Renderer) bodyFill(bs *BodyState) {
-	if bs.Org > len(bs.Text) {
-		bs.Org = len(bs.Text)
+	runes := bs.Buf.Runes()
+	if bs.Org > len(runes) {
+		bs.Org = len(runes)
 	}
-	end := len(bs.Text)
-	runes := bs.Text[bs.Org:]
-	if len(runes) > 0 {
-		bs.Frame.Insert(runes, 0)
+	visible := runes[bs.Org:]
+	if len(visible) > 0 {
+		bs.Frame.Insert(visible, 0)
 	}
-	_ = end
+	bs.seq = bs.Buf.Seq()
 }
 
 // paintBody renders a body node using the frame package.
 func (r *Renderer) paintBody(n *layout.RNode) {
-	bs := r.ensureBody(n.ID)
-
-	// Only set initial text from tree props on first init
-	if !bs.Init {
-		text := n.Props["text"]
-		if text != "" {
-			bs.Text = []rune(text)
+	// Look up the buffer — either from a Window (via winid prop) or standalone
+	var buf *window.Buffer
+	if r.Row != nil {
+		if widStr := n.Props["winid"]; widStr != "" {
+			wid := 0
+			for _, c := range widStr {
+				if c >= '0' && c <= '9' {
+					wid = wid*10 + int(c-'0')
+				}
+			}
+			if w := r.Row.LookID(wid); w != nil {
+				buf = &w.Body
+			}
 		}
+	}
+
+	bs := r.ensureBody(n.ID, buf)
+
+	// On first init, seed buffer from tree props if buffer is empty
+	if !bs.Init && bs.Buf.Nc() == 0 {
+		if text := n.Props["text"]; text != "" {
+			bs.Buf.SetAll(text)
+		}
+	}
+
+	// Check if buffer was externally modified (e.g. by ctl write, Get, etc.)
+	if bs.seq != bs.Buf.Seq() && bs.Init {
+		p0, p1 := bs.Frame.P0, bs.Frame.P1
+		bs.Frame.Clear(false)
+		r.initBody(bs, n)
+		// Try to restore selection
+		if bs.Frame.Nchars > 0 {
+			if p0 > bs.Frame.Nchars {
+				p0 = bs.Frame.Nchars
+			}
+			if p1 > bs.Frame.Nchars {
+				p1 = bs.Frame.Nchars
+			}
+			bs.Frame.P0, bs.Frame.P1 = p0, p1
+		}
+		return
 	}
 
 	// First time or rect changed: full reinit
@@ -136,23 +183,14 @@ func (r *Renderer) paintBody(n *layout.RNode) {
 		bs.Frame.Clear(false)
 		r.initBody(bs, n)
 		// Restore selection (in frame coordinates)
-		fp0 := uint32(0)
-		fp1 := uint32(0)
 		if bs.Frame.Nchars > 0 {
-			// Convert buffer selection to frame-relative
-			if int(p0)+bs.Org <= len(bs.Text) {
-				fp0 = p0
+			if p0 > bs.Frame.Nchars {
+				p0 = bs.Frame.Nchars
 			}
-			if int(p1)+bs.Org <= len(bs.Text) {
-				fp1 = p1
+			if p1 > bs.Frame.Nchars {
+				p1 = bs.Frame.Nchars
 			}
-			if fp0 > bs.Frame.Nchars {
-				fp0 = bs.Frame.Nchars
-			}
-			if fp1 > bs.Frame.Nchars {
-				fp1 = bs.Frame.Nchars
-			}
-			bs.Frame.P0, bs.Frame.P1 = fp0, fp1
+			bs.Frame.P0, bs.Frame.P1 = p0, p1
 		}
 	} else {
 		// Frame is correct — just redraw (full-screen paint cleared our pixels)
@@ -186,6 +224,8 @@ func (r *Renderer) bodyScroll(bs *BodyState, dl int) {
 	if dl == 0 {
 		return
 	}
+	runes := bs.Buf.Runes()
+
 	// Estimate characters per line
 	charsPerLine := 0
 	if bs.Frame.Nchars > 0 && bs.Frame.Nlines > 0 {
@@ -199,14 +239,13 @@ func (r *Renderer) bodyScroll(bs *BodyState, dl int) {
 	if newOrg < 0 {
 		newOrg = 0
 	}
-	if newOrg > len(bs.Text) {
-		newOrg = len(bs.Text)
+	if newOrg > len(runes) {
+		newOrg = len(runes)
 	}
 
 	// Snap to line boundaries if scrolling forward
-	if newOrg > 0 && newOrg < len(bs.Text) {
-		// Find previous newline
-		for newOrg > 0 && bs.Text[newOrg-1] != '\n' {
+	if newOrg > 0 && newOrg < len(runes) {
+		for newOrg > 0 && runes[newOrg-1] != '\n' {
 			newOrg--
 		}
 	}
@@ -240,7 +279,7 @@ func (r *Renderer) BodyClick(id string, mc *draw.Mousectl, button int) *proto.Ac
 		// B2: execute — find word at click position
 		pos := bs.Frame.CharOfPt(mc.Mouse.Point)
 		bufPos := int(pos) + bs.Org
-		word := wordAt(bs.Text, bufPos)
+		word := wordAt(bs.Buf.Runes(), bufPos)
 		if word == "" {
 			return nil
 		}
@@ -256,7 +295,7 @@ func (r *Renderer) BodyClick(id string, mc *draw.Mousectl, button int) *proto.Ac
 		// B3: look — find word at click position
 		pos := bs.Frame.CharOfPt(mc.Mouse.Point)
 		bufPos := int(pos) + bs.Org
-		word := wordAt(bs.Text, bufPos)
+		word := wordAt(bs.Buf.Runes(), bufPos)
 		if word == "" {
 			return nil
 		}
@@ -271,7 +310,7 @@ func (r *Renderer) BodyClick(id string, mc *draw.Mousectl, button int) *proto.Ac
 	return nil
 }
 
-// BodyType handles typing into a body.
+// BodyType handles typing into a body. Edits go directly into the Buffer.
 func (r *Renderer) BodyType(id string, key rune) {
 	bs, ok := r.Bodies[id]
 	if !ok || !bs.Init {
@@ -286,9 +325,7 @@ func (r *Renderer) BodyType(id string, key rune) {
 				if bs.Org > 0 {
 					// Delete into the off-screen buffer
 					bs.Org--
-					bs.Text = append(bs.Text[:bs.Org], bs.Text[bs.Org+1:]...)
-					bs.Dirty = true
-					// Rebuild frame
+					bs.Buf.Delete(bs.Org, bs.Org+1)
 					r.bodyRebuild(bs)
 				}
 				return
@@ -301,16 +338,13 @@ func (r *Renderer) BodyType(id string, key rune) {
 		if bufQ0 < 0 {
 			bufQ0 = 0
 		}
-		if bufQ1 > len(bs.Text) {
-			bufQ1 = len(bs.Text)
+		if bufQ1 > bs.Buf.Nc() {
+			bufQ1 = bs.Buf.Nc()
 		}
-		newText := make([]rune, 0, len(bs.Text))
-		newText = append(newText, bs.Text[:bufQ0]...)
-		newText = append(newText, bs.Text[bufQ1:]...)
-		bs.Text = newText
-		bs.Dirty = true
+		bs.Buf.Delete(bufQ0, bufQ1)
 		// Delete in frame
 		bs.Frame.Delete(q0, q1)
+		bs.seq = bs.Buf.Seq()
 
 	case key == '\n' || key == '\t' || (key >= 32 && key < draw.KF): // printable + newline + tab
 		q0, q1 := bs.Frame.P0, bs.Frame.P1
@@ -318,24 +352,17 @@ func (r *Renderer) BodyType(id string, key rune) {
 		if q0 != q1 {
 			bufQ0 := int(q0) + bs.Org
 			bufQ1 := int(q1) + bs.Org
-			newText := make([]rune, 0, len(bs.Text))
-			newText = append(newText, bs.Text[:bufQ0]...)
-			newText = append(newText, bs.Text[bufQ1:]...)
-			bs.Text = newText
+			bs.Buf.Delete(bufQ0, bufQ1)
 			bs.Frame.Delete(q0, q1)
 		}
 		pos := q0
 		bufPos := int(pos) + bs.Org
-		// Insert into text buffer
+		// Insert into buffer
 		ch := []rune{key}
-		newText := make([]rune, 0, len(bs.Text)+1)
-		newText = append(newText, bs.Text[:bufPos]...)
-		newText = append(newText, ch...)
-		newText = append(newText, bs.Text[bufPos:]...)
-		bs.Text = newText
-		bs.Dirty = true
+		bs.Buf.Insert(bufPos, ch)
 		// Insert into frame
 		bs.Frame.Insert(ch, pos)
+		bs.seq = bs.Buf.Seq()
 
 	case key == draw.Kup: // scroll up
 		r.bodyScroll(bs, -bs.Frame.Maxlines/2)
@@ -348,7 +375,7 @@ func (r *Renderer) BodyType(id string, key rune) {
 	case key == draw.Khome:
 		r.BodyScrollTo(id, 0)
 	case key == draw.Kend:
-		r.BodyScrollTo(id, len(bs.Text))
+		r.BodyScrollTo(id, bs.Buf.Nc())
 	}
 }
 
@@ -362,20 +389,20 @@ func (r *Renderer) bodyRebuild(bs *BodyState) {
 	r.bodyFill(bs)
 }
 
-// BodyText returns the complete text in a body.
+// BodyText returns the complete text in a body's buffer.
 func (r *Renderer) BodyText(id string) string {
 	if bs, ok := r.Bodies[id]; ok {
-		return string(bs.Text)
+		return bs.Buf.ReadAll()
 	}
 	return ""
 }
 
-// SetBodyText replaces the complete text in a body.
+// SetBodyText replaces the complete text in a body's buffer.
 func (r *Renderer) SetBodyText(id string, text string) {
-	bs := r.ensureBody(id)
-	bs.Text = []rune(text)
+	bs := r.ensureBody(id, nil)
+	bs.Buf.SetAll(text)
+	bs.Buf.Clean()
 	bs.Org = 0
-	bs.Dirty = false
 	if bs.Init {
 		r.bodyRebuild(bs)
 	}
@@ -387,14 +414,15 @@ func (r *Renderer) BodyScrollTo(id string, pos int) {
 	if !ok {
 		return
 	}
+	runes := bs.Buf.Runes()
 	if pos < 0 {
 		pos = 0
 	}
-	if pos > len(bs.Text) {
-		pos = len(bs.Text)
+	if pos > len(runes) {
+		pos = len(runes)
 	}
 	// Snap to line start
-	for pos > 0 && bs.Text[pos-1] != '\n' {
+	for pos > 0 && runes[pos-1] != '\n' {
 		pos--
 	}
 	bs.Org = pos
@@ -403,18 +431,18 @@ func (r *Renderer) BodyScrollTo(id string, pos int) {
 	}
 }
 
-// BodyDirty returns whether a body has been modified.
+// BodyDirty returns whether a body's buffer has been modified.
 func (r *Renderer) BodyDirty(id string) bool {
 	if bs, ok := r.Bodies[id]; ok {
-		return bs.Dirty
+		return bs.Buf.Dirty()
 	}
 	return false
 }
 
-// BodyClean marks a body as clean (after saving, etc).
+// BodyClean marks a body's buffer as clean (after saving, etc).
 func (r *Renderer) BodyClean(id string) {
 	if bs, ok := r.Bodies[id]; ok {
-		bs.Dirty = false
+		bs.Buf.Clean()
 	}
 }
 
@@ -429,13 +457,14 @@ func (r *Renderer) BodySelection(id string) string {
 	if q0 < 0 {
 		q0 = 0
 	}
-	if q1 > len(bs.Text) {
-		q1 = len(bs.Text)
+	nc := bs.Buf.Nc()
+	if q1 > nc {
+		q1 = nc
 	}
 	if q0 >= q1 {
 		return ""
 	}
-	return string(bs.Text[q0:q1])
+	return bs.Buf.ReadRange(q0, q1)
 }
 
 // Unused import suppressor

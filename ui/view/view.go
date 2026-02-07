@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/elizafairlady/go-libui/ui/proto"
+	"github.com/elizafairlady/go-libui/ui/window"
 )
 
 // Node is a UI view tree node with an ID, type, props, and children.
@@ -69,6 +70,14 @@ type Executor interface {
 	// BinDirs returns additional directories to search for external
 	// commands (like Plan 9's $home/bin). Can return nil.
 	BinDirs() []string
+}
+
+// RowProvider is an optional interface that apps can implement to
+// provide a window.Row. When present, body nodes with a "winid"
+// prop get their text buffer from the Row's Window, making the body
+// a proper file-backed view rather than renderer-owned state.
+type RowProvider interface {
+	WindowRow() *window.Row
 }
 
 // --- Node builder helpers ---

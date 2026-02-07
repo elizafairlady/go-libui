@@ -11,6 +11,7 @@ import (
 	"github.com/elizafairlady/go-libui/ui/layout"
 	"github.com/elizafairlady/go-libui/ui/proto"
 	"github.com/elizafairlady/go-libui/ui/theme"
+	"github.com/elizafairlady/go-libui/ui/window"
 )
 
 // Renderer paints a layout tree to a draw.Image.
@@ -19,6 +20,11 @@ type Renderer struct {
 	Screen  *draw.Image
 	Font    *draw.Font
 	Theme   *theme.Theme
+
+	// Row is the window.Row that owns all Window buffers.
+	// Body nodes with a "winid" prop get their Buffer from here.
+	// Set by the app (ui.Run wires this up).
+	Row *window.Row
 
 	// State
 	Focus     string         // focused node ID

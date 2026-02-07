@@ -53,6 +53,12 @@ func Run(title string, app view.App) error {
 	u.BodySelectionFn = r.BodySelection
 	u.TagTextFn = r.TagText
 
+	// If the app provides a Row, wire it to the renderer so body nodes
+	// with winid get their buffers from Window objects (not renderer state).
+	if rp, ok := app.(view.RowProvider); ok {
+		r.Row = rp.WindowRow()
+	}
+
 	// Create executor for B2 command handling
 	ex := newExecutor(app, u, r)
 
