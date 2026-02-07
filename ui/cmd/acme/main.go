@@ -191,7 +191,7 @@ func (a *acmeApp) View(s view.State) *view.Node {
 	}
 
 	return view.VBox("root",
-		view.Tag("row-tag", "Newcol Kill Putall Dump Load Exit").PropInt("pad", 2),
+		view.Tag("row-tag", "Newcol Kill Putall Dump Load Exit").PropInt("pad", 0),
 		view.Rect("row-sep").Prop("bg", "acmeborder").PropInt("minh", 1).PropInt("maxh", 1),
 		view.SplitBox("row-cols", colNodes...).
 			Prop("direction", "horizontal").
@@ -210,7 +210,7 @@ func (a *acmeApp) viewColumn(s view.State, cid string) *view.Node {
 	var children []*view.Node
 	children = append(children,
 		view.Tag("ct-"+cid, "New Cut Paste Snarf Zerox Delcol").
-			PropInt("pad", 2).Prop("bg", "acmetag"),
+			PropInt("pad", 0).Prop("bg", "acmetag"),
 		view.Rect("cs-"+cid).Prop("bg", "acmeborder").
 			PropInt("minh", 1).PropInt("maxh", 1),
 	)
@@ -245,7 +245,7 @@ func (a *acmeApp) viewWindow(s view.State, cid, wid string) *view.Node {
 	tagText := displayName + " Del Snarf Get Put Look |"
 
 	return view.VBox("win-"+cid+"-"+wid,
-		view.Tag("wt-"+cid+"-"+wid, tagText).PropInt("pad", 2),
+		view.Tag("wt-"+cid+"-"+wid, tagText).PropInt("pad", 0),
 		view.Rect("ws-"+cid+"-"+wid).Prop("bg", "acmeborder").
 			PropInt("minh", 1).PropInt("maxh", 1),
 		view.Body("wb-"+cid+"-"+wid).Prop("flex", "1"),

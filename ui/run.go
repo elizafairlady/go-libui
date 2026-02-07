@@ -74,6 +74,11 @@ func Run(title string, app view.App) error {
 		return tree, root
 	}
 
+	// checkQuit returns true if the app requested exit.
+	checkQuit := func() bool {
+		return u.GetState("_quit") == "1"
+	}
+
 	repaint := func() {
 		tree, root := buildAndLayout()
 		if tree == nil || root == nil {
@@ -84,6 +89,9 @@ func Run(title string, app view.App) error {
 	}
 
 	repaint()
+	if checkQuit() {
+		return nil
+	}
 
 	// Event loop
 	for {
@@ -161,7 +169,7 @@ func Run(title string, app view.App) error {
 					if act != nil {
 						// B2 execute: try executor first
 						if act.Kind == "execute" && ex.execute(act) {
-							// Handled by builtin or external command
+							u.Invalidate() // builtin modified state; dirty the tree
 						} else {
 							u.HandleAction(act)
 						}
@@ -174,7 +182,7 @@ func Run(title string, app view.App) error {
 					if act != nil {
 						// B2 execute: try executor first
 						if act.Kind == "execute" && ex.execute(act) {
-							// Handled by builtin or external command
+							u.Invalidate() // builtin modified state; dirty the tree
 						} else {
 							u.HandleAction(act)
 						}
@@ -188,6 +196,9 @@ func Run(title string, app view.App) error {
 				}
 			}
 			repaint()
+			if checkQuit() {
+				return nil
+			}
 
 		case key, ok := <-kc.C:
 			if !ok {
@@ -330,6 +341,9 @@ func Run(title string, app view.App) error {
 			}
 
 			repaint()
+			if checkQuit() {
+				return nil
+			}
 
 		case <-mc.Resize:
 			d.GetWindow(draw.Refnone)
