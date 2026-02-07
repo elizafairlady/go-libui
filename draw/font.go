@@ -20,6 +20,8 @@ const (
 	CACHEAGE    = 10000            // expiry age for cache entries
 )
 
+const PJW = 0 // use NUL==pjw for invisible characters
+
 // OpenFont opens a font file and returns a Font.
 func (d *Display) OpenFont(name string) (*Font, error) {
 	data, err := os.ReadFile(name)
@@ -124,6 +126,397 @@ func (d *Display) BuildFont(buf []byte, name string) (*Font, error) {
 
 	fnt.nsub = len(fnt.sub)
 	return fnt, nil
+}
+
+// cachechars looks up/loads characters and returns cache indices.
+// Port of 9front cachechars().
+// Returns number of translated cache indices, 0 = must retry, -1 = error.
+func (f *Font) cachechars(s *string, r *[]rune, cp []uint16, max int) (int, int, *string) {
+	// Guard: if cache is not properly initialized, return 0
+	if f.ncache < NFLOOK+1 || len(f.cache) < f.ncache {
+		return 0, 0, nil
+	}
+
+	wid := 0
+	var subfontname *string
+
+	si := 0 // position in string
+	ri := 0 // position in rune slice
+	var sp string
+	var rp []rune
+	useStr := false
+
+	if s != nil {
+		sp = *s
+		useStr = true
+	}
+	if r != nil {
+		rp = *r
+	}
+
+	i := 0
+	for i < max {
+		var ch rune
+		var sw int
+		if useStr {
+			if si >= len(sp) {
+				break
+			}
+			// Decode one rune
+			ch = rune(sp[si])
+			sw = 1
+			if ch >= 0x80 {
+				// Multi-byte UTF-8: convert via rune
+				rs := []rune(sp[si:])
+				if len(rs) == 0 {
+					break
+				}
+				ch = rs[0]
+				sw = len(string(ch))
+			}
+		} else {
+			if ri >= len(rp) {
+				break
+			}
+			ch = rp[ri]
+			sw = 0
+		}
+
+		// Hash lookup in cache
+		h := (17 * int(uint(ch))) & (f.ncache - NFLOOK - 1)
+		var c *Cacheinfo
+		var bestAge uint32 = ^uint32(0)
+		bestIdx := h
+		found := false
+
+		for j := h; j < h+NFLOOK; j++ {
+			if f.cache[j].value == ch && f.cache[j].age != 0 {
+				c = &f.cache[j]
+				h = j
+				found = true
+				break
+			}
+			if f.cache[j].age < bestAge {
+				bestAge = f.cache[j].age
+				bestIdx = j
+			}
+		}
+
+		if !found {
+			// Not found; use oldest entry
+			c = &f.cache[bestIdx]
+			h = bestIdx
+
+			if bestAge != 0 && (f.age-bestAge) < 500 {
+				// Kicking out too recent; try to resize
+				nc := 2*(f.ncache-NFLOOK) + NFLOOK
+				if nc <= MAXFCACHE {
+					if i == 0 {
+						f.fontresize(f.width, nc, f.maxdepth)
+					}
+					break // flush first; retry will resize
+				}
+			}
+
+			if i > 0 && c.age == f.age {
+				break // flush pending string output
+			}
+
+			j, sfname := f.loadchar(ch, c, h, i)
+			if j <= 0 {
+				if j < 0 || i > 0 {
+					if sfname != nil {
+						subfontname = sfname
+					}
+					break
+				}
+				// Skip this character
+				if useStr {
+					si += sw
+				} else {
+					ri++
+				}
+				continue // return -1 = stop retrying
+			}
+			if sfname != nil {
+				subfontname = sfname
+			}
+		}
+
+		wid += int(c.width)
+		c.age = f.age
+		cp[i] = uint16(h)
+		i++
+
+		if useStr {
+			si += sw
+		} else {
+			ri++
+		}
+	}
+
+	if s != nil {
+		rest := sp[si:]
+		*s = rest
+	}
+	if r != nil {
+		*r = rp[ri:]
+	}
+
+	return i, wid, subfontname
+}
+
+// cf2subfont loads a subfont for a Cachefont entry.
+// Port of 9front cf2subfont().
+func cf2subfont(cf *Cachefont, f *Font) *Subfont {
+	name := cf.Subfontname
+	if name == "" {
+		depth := 8
+		if f.Display != nil && f.Display.ScreenImage != nil {
+			depth = f.Display.ScreenImage.Depth
+		}
+		name = SubfontName(cf.Name, f.Name, depth)
+		if name == "" {
+			return nil
+		}
+		cf.Subfontname = name
+	}
+	sf := LookupSubfont(f.Display, name)
+	if sf != nil {
+		return sf
+	}
+	// Try to open from file
+	if f.Display != nil {
+		sf = f.Display.openSubfont(name)
+	}
+	return sf
+}
+
+// loadchar loads a glyph from subfont into cache and sends 'l' to devdraw.
+// Port of 9front loadchar(). Returns 1 on success, 0 on failure, -1 on retry needed.
+func (f *Font) loadchar(r rune, c *Cacheinfo, h int, noflush int) (int, *string) {
+	pic := r
+
+Again:
+	var cf *Cachefont
+	for i := 0; i < f.nsub; i++ {
+		cf = f.sub[i]
+		if cf.Min <= int(pic) && int(pic) <= cf.Max {
+			goto Found
+		}
+	}
+	if pic != PJW {
+		pic = PJW
+		goto Again
+	}
+	return 0, nil
+
+Found:
+	// Choose exact or oldest subf slot
+	oi := 0
+	var subf *Cachesubf
+	for i := 0; i < f.nsubf; i++ {
+		if cf == f.subf[i].cf {
+			subf = &f.subf[i]
+			goto Found2
+		}
+		if f.subf[i].age < f.subf[oi].age {
+			oi = i
+		}
+	}
+	subf = &f.subf[oi]
+
+	if subf.f != nil {
+		if f.age-subf.age > SUBFAGE || f.nsubf > MAXSUBF {
+			// Ancient data; toss
+			if f.Display == nil || subf.f != f.Display.DefaultSubfont {
+				subf.f.Free()
+			}
+			subf.cf = nil
+			subf.f = nil
+			subf.age = 0
+		} else {
+			// Too recent; grow instead
+			newsubf := make([]Cachesubf, f.nsubf+DSUBF)
+			copy(newsubf, f.subf)
+			f.subf = newsubf
+			subf = &f.subf[f.nsubf]
+			f.nsubf += DSUBF
+		}
+	}
+	subf.age = 0
+	subf.cf = nil
+	subf.f = cf2subfont(cf, f)
+	if subf.f == nil {
+		if cf.Subfontname == "" {
+			if pic != PJW {
+				pic = PJW
+				goto Again
+			}
+			return 0, nil
+		}
+		sfn := cf.Subfontname
+		return -1, &sfn
+	}
+	subf.cf = cf
+
+	// Adjust ascent if subfont has larger ascent than font
+	if subf.f.Ascent > f.Ascent && f.Display != nil {
+		d := subf.f.Ascent - f.Ascent
+		b := subf.f.Bits
+		if b != nil {
+			b.Draw(b.R, b, b.R.Min.Add(Pt(0, d)))
+			b.Draw(Rect(b.R.Min.X, b.R.Max.Y-d, b.R.Max.X, b.R.Max.Y),
+				f.Display.Black, b.R.Min)
+		}
+		for i := 0; i < subf.f.N; i++ {
+			t := int(subf.f.Info[i].Top) - d
+			if t < 0 {
+				t = 0
+			}
+			subf.f.Info[i].Top = byte(t)
+			t = int(subf.f.Info[i].Bottom) - d
+			if t < 0 {
+				t = 0
+			}
+			subf.f.Info[i].Bottom = byte(t)
+		}
+		subf.f.Ascent = f.Ascent
+	}
+
+Found2:
+	subf.age = f.age
+
+	// Possible overflow here, but works out okay
+	idx := int(pic) + cf.Offset - cf.Min
+	if idx >= subf.f.N {
+		if pic != PJW {
+			pic = PJW
+			goto Again
+		}
+		return 0, nil
+	}
+	fi := &subf.f.Info[idx]
+	if fi.Width == 0 {
+		if pic != PJW {
+			pic = PJW
+			goto Again
+		}
+		return 0, nil
+	}
+
+	wid := int(subf.f.Info[idx+1].X) - int(fi.X)
+	if f.width < wid || f.width == 0 || f.maxdepth < subf.f.Bits.Depth ||
+		(f.Display != nil && f.cacheimage == nil) {
+		// Need to resize cache
+		if noflush > 0 {
+			return -1, nil
+		}
+		if f.width < wid {
+			f.width = wid
+		}
+		if f.maxdepth < subf.f.Bits.Depth {
+			f.maxdepth = subf.f.Bits.Depth
+		}
+		if !f.fontresize(f.width, f.ncache, f.maxdepth) {
+			return -1, nil
+		}
+	}
+
+	c.value = r
+	c.width = fi.Width
+	c.x = uint16(h * f.width)
+	c.left = fi.Left
+
+	if f.Display == nil {
+		return 1, nil
+	}
+
+	d := f.Display
+	// Send 'l' command to load glyph into cache image
+	b, err := d.bufimage(37)
+	if err != nil {
+		return 0, nil
+	}
+
+	top := int(fi.Top) + (f.Ascent - subf.f.Ascent)
+	bottom := int(fi.Bottom) + (f.Ascent - subf.f.Ascent)
+
+	b[0] = 'l'
+	bplong(b[1:], uint32(f.cacheimage.id))
+	bplong(b[5:], uint32(subf.f.Bits.id))
+	bpshort(b[9:], uint16(h))
+	bplong(b[11:], uint32(c.x))
+	bplong(b[15:], uint32(top))
+	bplong(b[19:], uint32(int(c.x)+wid))
+	bplong(b[23:], uint32(bottom))
+	bplong(b[27:], uint32(fi.X))
+	bplong(b[31:], uint32(fi.Top))
+	b[35] = byte(fi.Left)
+	b[36] = fi.Width
+
+	return 1, nil
+}
+
+// fontresize allocates/resizes the font cache image and sends 'i' to devdraw.
+// Port of 9front fontresize(). Returns true if cache pointer unchanged.
+func (f *Font) fontresize(wid, ncache, depth int) bool {
+	if depth <= 0 {
+		depth = 1
+	}
+	if wid <= 0 {
+		wid = 1
+	}
+
+	d := f.Display
+	if d == nil {
+		goto Nodisplay
+	}
+
+	{
+		newimg, err := d.AllocImage(Rect(0, 0, ncache*wid, f.Height),
+			MakePix(CGrey, depth), false, 0)
+		if err != nil {
+			return false
+		}
+
+		// Send 'i' command: initialize font cache
+		b, err := d.bufimage(1 + 4 + 4 + 1)
+		if err != nil {
+			newimg.Free()
+			return false
+		}
+		b[0] = 'i'
+		bplong(b[1:], uint32(newimg.id))
+		bplong(b[5:], uint32(ncache))
+		b[9] = byte(f.Ascent)
+
+		if f.cacheimage != nil {
+			f.cacheimage.Free()
+		}
+		f.cacheimage = newimg
+	}
+
+Nodisplay:
+	f.width = wid
+	f.maxdepth = depth
+	ret := true
+	if f.ncache != ncache {
+		f.cache = make([]Cacheinfo, ncache)
+		f.ncache = ncache
+		ret = false
+	} else {
+		// Zero out existing cache
+		for i := range f.cache {
+			f.cache[i] = Cacheinfo{}
+		}
+	}
+	return ret
+}
+
+// MakePix creates a Pix descriptor for a single channel.
+func MakePix(typ int, nbits int) Pix {
+	return Pix(typ<<4 | nbits)
 }
 
 // Agefont increments the font age and renormalizes if needed.

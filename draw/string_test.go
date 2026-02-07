@@ -56,8 +56,8 @@ func TestStringNWidthLimit(t *testing.T) {
 func TestCacheLookup(t *testing.T) {
 	f := &Font{
 		cache: []Cacheinfo{
-			{value: 'A', width: 8, left: 0},
-			{value: 'B', width: 9, left: 1},
+			{value: 'A', width: 8, left: 0, age: 1},
+			{value: 'B', width: 9, left: 1, age: 1},
 		},
 	}
 	ci, ok := f.cacheLookup('A')
@@ -93,12 +93,10 @@ func TestCacheLookupNil(t *testing.T) {
 
 // TestRuneStringWidth tests rune string width with cached chars.
 func TestRuneStringWidth(t *testing.T) {
+	// With uninitialized cache (ncache=0), falls back to f.width * n
 	f := &Font{
 		Height: 16,
-		cache: []Cacheinfo{
-			{value: 'H', width: 8},
-			{value: 'i', width: 4},
-		},
+		width:  6,
 	}
 	runes := []rune{'H', 'i'}
 	if got := f.RuneStringWidth(runes); got != 12 {
