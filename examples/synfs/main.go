@@ -25,7 +25,7 @@ import (
 	"9fans.net/go/plan9"
 )
 
-var addr = flag.String("a", "localhost:5640", "listen address")
+var addr = flag.String("a", ":5640", "listen address")
 
 // fileContent is what the synthetic file "hello" contains.
 var fileContent = []byte("hello, world\n")
