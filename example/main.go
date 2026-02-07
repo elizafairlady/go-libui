@@ -34,7 +34,15 @@ var (
 	kc *draw.Keyboardctl
 
 	drawCount int // counts draw-dot interactions
+
+	// Saved dots for redrawing after menu/resize
+	dots []dotInfo
 )
+
+type dotInfo struct {
+	p     draw.Point
+	color uint32 // color value so we can reconstruct
+}
 
 // alloccolor allocates a 1×1 replicated image filled with the given color.
 // This is the standard Plan 9 way to make a "color brush".
@@ -98,6 +106,16 @@ func redraw() {
 	// --- Section: Truecolor palette with drop shadow ---
 	drawTruecolorPalette(x, y, inner.Dx()-20)
 	y += 50
+
+	// Replay saved dots
+	for _, d := range dots {
+		c, err := display.AllocImage(draw.Rect(0, 0, 1, 1), draw.RGB24, true, d.color)
+		if err != nil {
+			continue
+		}
+		screen.FillEllipse(d.p, 5, 5, c, draw.ZP)
+		c.Free()
+	}
 
 	// Status bar
 	drawStatus(inner, y)
@@ -445,6 +463,7 @@ func main() {
 
 	// Current brush color for dot drawing
 	dotColor := display.Black
+	dotColorVal := uint32(draw.DBlack)
 
 	// Main menu
 	mainMenu := &draw.Menu{
@@ -473,6 +492,7 @@ func main() {
 		case m := <-mc.C:
 			if m.Buttons&1 != 0 {
 				// Left click — draw a dot
+				dots = append(dots, dotInfo{p: m.Point, color: dotColorVal})
 				handleDot(m.Point, dotColor)
 			}
 			if m.Buttons&2 != 0 {
@@ -485,6 +505,7 @@ func main() {
 					return
 				case 0: // Clear
 					drawCount = 0
+					dots = nil
 				}
 				redraw() // clean up menu residue
 			}
@@ -495,16 +516,22 @@ func main() {
 				switch sel {
 				case 0:
 					dotColor = display.Black
+					dotColorVal = draw.DBlack
 				case 1:
 					dotColor = red
+					dotColorVal = draw.DRed
 				case 2:
 					dotColor = green
+					dotColorVal = draw.DGreen
 				case 3:
 					dotColor = blue
+					dotColorVal = draw.DBlue
 				case 4:
 					dotColor = cyan
+					dotColorVal = draw.DCyan
 				case 5:
 					dotColor = magenta
+					dotColorVal = draw.DMagenta
 				}
 				if sel >= 0 {
 					colorMenu.Lasthit = sel
@@ -520,6 +547,7 @@ func main() {
 			case 'c':
 				// Clear
 				drawCount = 0
+				dots = nil
 				redraw()
 			case 'r':
 				// Redraw
