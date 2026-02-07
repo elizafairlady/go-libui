@@ -1,103 +1,80 @@
 package draw
 
 import (
-	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
+	"sync"
 )
 
-// OpenSubfont opens a subfont file.
-func (d *Display) OpenSubfont(name string) (*Subfont, error) {
-	sf := d.openSubfont(name)
-	if sf == nil {
-		return nil, fmt.Errorf("cannot open subfont: %s", name)
+// Subfont cache: simple last-used cache matching 9front subfontcache.c.
+var (
+	subfontMu       sync.Mutex
+	lastSubfontName string
+	lastSubfont     *Subfont
+)
+
+// LookupSubfont looks up a subfont in the global cache.
+// Port of 9front lookupsubfont().
+func LookupSubfont(d *Display, name string) *Subfont {
+	subfontMu.Lock()
+	defer subfontMu.Unlock()
+
+	if d != nil && name == "*default*" {
+		return d.DefaultSubfont
 	}
-	return sf, nil
+	if lastSubfontName == name && lastSubfont != nil {
+		if d == nil || lastSubfont.Bits == nil || lastSubfont.Bits.Display == d {
+			lastSubfont.ref++
+			return lastSubfont
+		}
+	}
+	return nil
 }
 
-func (d *Display) openSubfont(name string) *Subfont {
-	f, err := os.Open(name)
-	if err != nil {
+// InstallSubfont installs a subfont in the global cache.
+// Port of 9front installsubfont().
+func InstallSubfont(name string, sf *Subfont) {
+	subfontMu.Lock()
+	defer subfontMu.Unlock()
+	lastSubfontName = name
+	lastSubfont = sf
+}
+
+// UninstallSubfont removes a subfont from the global cache.
+// Port of 9front uninstallsubfont().
+func UninstallSubfont(sf *Subfont) {
+	subfontMu.Lock()
+	defer subfontMu.Unlock()
+	if sf == lastSubfont {
+		lastSubfontName = ""
+		lastSubfont = nil
+	}
+}
+
+// AllocSubfont creates a new subfont.
+// Port of 9front allocsubfont().
+func AllocSubfont(name string, n, height, ascent int, info []Fontchar, i *Image) *Subfont {
+	if height == 0 {
 		return nil
 	}
-	defer f.Close()
-
-	sf, err := d.readSubfont(f, name)
-	if err != nil {
-		return nil
+	sf := &Subfont{
+		N:      n,
+		Height: height,
+		Ascent: ascent,
+		Info:   info,
+		Bits:   i,
+		ref:    1,
+	}
+	if name != "" {
+		sf.Name = name
+		InstallSubfont(name, sf)
 	}
 	return sf
 }
 
-// readSubfont reads a subfont from an image file.
-func (d *Display) readSubfont(f *os.File, name string) (*Subfont, error) {
-	// Read the image first
-	img, err := d.ReadImage(f)
-	if err != nil {
-		return nil, err
-	}
-
-	// Read the subfont header from the end of the file
-	// Subfont data comes after image data
-	// Format: n[2] height[1] ascent[1] info[n+1][6]
-
-	// Actually, subfonts have their glyph info embedded
-	// The format is: the image followed by character descriptions
-
-	// Read character info
-	// Seek to find the character info after the image
-	// For now, try to read from a .subfont companion file
-	// or embedded in the image file
-
-	// Simplified: assume fixed-width font for now
-	n := 256 // assume 256 characters
-	height := img.R.Dy()
-	ascent := height * 3 / 4
-
-	info := make([]Fontchar, n+1)
-	charWidth := img.R.Dx() / n
-	if charWidth < 1 {
-		charWidth = 1
-	}
-
-	for i := 0; i <= n; i++ {
-		info[i] = Fontchar{
-			X:      i * charWidth,
-			Top:    0,
-			Bottom: byte(height),
-			Left:   0,
-			Width:  byte(charWidth),
-		}
-	}
-
-	return &Subfont{
-		Name:   name,
-		N:      n,
-		Height: height,
-		Ascent: ascent,
-		Info:   info,
-		Bits:   img,
-		ref:    1,
-	}, nil
-}
-
-// AllocSubfont creates a new subfont from an image and character info.
-func (d *Display) AllocSubfont(name string, height, ascent, n int, info []Fontchar, bits *Image) *Subfont {
-	if len(info) < n+1 {
-		return nil
-	}
-	return &Subfont{
-		Name:   name,
-		N:      n,
-		Height: height,
-		Ascent: ascent,
-		Info:   info,
-		Bits:   bits,
-		ref:    1,
-	}
-}
-
 // Free releases the subfont resources.
+// Port of 9front freesubfont().
 func (sf *Subfont) Free() {
 	if sf == nil {
 		return
@@ -106,102 +83,146 @@ func (sf *Subfont) Free() {
 	if sf.ref > 0 {
 		return
 	}
+	UninstallSubfont(sf)
 	if sf.Bits != nil {
 		sf.Bits.Free()
 		sf.Bits = nil
 	}
+	sf.Info = nil
 }
 
-// InstallSubfont installs a subfont in a font's cache.
-func (f *Font) InstallSubfont(name string, sf *Subfont) {
-	if f == nil || sf == nil {
-		return
-	}
-	// Find or create the cachefont entry
-	for i := range f.sub {
-		if f.sub[i] != nil && f.sub[i].Name == name {
-			// Install into subf cache
-			f.subf = append(f.subf, Cachesubf{cf: f.sub[i], f: sf})
-			sf.ref++
-			return
-		}
-	}
-}
+// ReadSubfonti reads a subfont from a reader, optionally with an already-read image.
+// Port of 9front readsubfonti().
+// The format after the image data is:
+//
+//	n[12] height[12] ascent[12]   (3 × 12-char decimal fields)
+//	info[(n+1)*6]                 (6-byte fontchar entries)
+func ReadSubfonti(d *Display, name string, r io.Reader, ai *Image) (*Subfont, error) {
+	var i *Image
+	var err error
 
-// LookupSubfont finds a cached subfont by name.
-func (f *Font) LookupSubfont(name string) *Subfont {
-	if f == nil {
-		return nil
-	}
-	for i := range f.subf {
-		if f.subf[i].f != nil && f.subf[i].f.Name == name {
-			return f.subf[i].f
-		}
-	}
-	return nil
-}
-
-// ReadSubfontFile reads subfont info from a file.
-// The format is: n[2] height[1] ascent[1] info[n+1][6]
-func ReadSubfontFile(f *os.File) (height, ascent, n int, info []Fontchar, err error) {
-	// Read header: 2 bytes for n, 1 for height, 1 for ascent
-	header := make([]byte, 4)
-	_, err = f.Read(header)
-	if err != nil {
-		return
-	}
-
-	n = int(binary.LittleEndian.Uint16(header[0:2]))
-	height = int(header[2])
-	ascent = int(header[3])
-
-	// Read fontchar info: (n+1) entries of 6 bytes each
-	info = make([]Fontchar, n+1)
-	buf := make([]byte, 6)
-	for i := 0; i <= n; i++ {
-		_, err = f.Read(buf)
+	if ai != nil {
+		i = ai
+	} else {
+		i, err = d.ReadImageReader(r)
 		if err != nil {
-			return
-		}
-		info[i] = Fontchar{
-			X:      int(binary.LittleEndian.Uint16(buf[0:2])),
-			Top:    buf[2],
-			Bottom: buf[3],
-			Left:   int8(buf[4]),
-			Width:  buf[5],
+			return nil, fmt.Errorf("readsubfont: image read error: %v", err)
 		}
 	}
 
-	return height, ascent, n, info, nil
+	// Read 3*12 byte header
+	hdr := make([]byte, 3*12)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		if ai == nil {
+			i.Free()
+		}
+		return nil, fmt.Errorf("readsubfont: header read error: %v", err)
+	}
+
+	n := atoi12(hdr[0:12])
+	height := atoi12(hdr[12:24])
+	ascent := atoi12(hdr[24:36])
+
+	if n <= 0 || n > 0x7FFF {
+		if ai == nil {
+			i.Free()
+		}
+		return nil, fmt.Errorf("readsubfont: bad fontchar count %d", n)
+	}
+
+	// Read (n+1) * 6 bytes of fontchar data
+	p := make([]byte, 6*(n+1))
+	if _, err := io.ReadFull(r, p); err != nil {
+		if ai == nil {
+			i.Free()
+		}
+		return nil, fmt.Errorf("readsubfont: fontchar read error: %v", err)
+	}
+
+	fc := unpackInfo(p, n)
+	sf := AllocSubfont(name, n, height, ascent, fc, i)
+	if sf == nil {
+		if ai == nil {
+			i.Free()
+		}
+		return nil, fmt.Errorf("readsubfont: allocsubfont failed")
+	}
+	return sf, nil
 }
 
-// WriteSubfontFile writes subfont info to a file.
-func WriteSubfontFile(f *os.File, height, ascent, n int, info []Fontchar) error {
-	// Write header
-	header := make([]byte, 4)
-	binary.LittleEndian.PutUint16(header[0:2], uint16(n))
-	header[2] = byte(height)
-	header[3] = byte(ascent)
-	_, err := f.Write(header)
-	if err != nil {
+// ReadSubfont reads a subfont from a reader.
+// Port of 9front readsubfont().
+func ReadSubfont(d *Display, name string, r io.Reader) (*Subfont, error) {
+	return ReadSubfonti(d, name, r, nil)
+}
+
+// unpackInfo unpacks n+1 fontchar entries from 6-byte packed form.
+// Port of 9front _unpackinfo().
+func unpackInfo(p []byte, n int) []Fontchar {
+	fc := make([]Fontchar, n+1)
+	for i := 0; i <= n; i++ {
+		off := i * 6
+		fc[i] = Fontchar{
+			X:      int(p[off]) | int(p[off+1])<<8,
+			Top:    p[off+2],
+			Bottom: p[off+3],
+			Left:   int8(p[off+4]),
+			Width:  p[off+5],
+		}
+	}
+	return fc
+}
+
+// packInfo packs fontchar entries into 6-byte packed form.
+func packInfo(fc []Fontchar, n int) []byte {
+	p := make([]byte, 6*(n+1))
+	for i := 0; i <= n && i < len(fc); i++ {
+		off := i * 6
+		p[off] = byte(fc[i].X)
+		p[off+1] = byte(fc[i].X >> 8)
+		p[off+2] = fc[i].Top
+		p[off+3] = fc[i].Bottom
+		p[off+4] = byte(fc[i].Left)
+		p[off+5] = fc[i].Width
+	}
+	return p
+}
+
+// WriteSubfont writes subfont info to a writer.
+// Port of 9front writesubfont().
+func WriteSubfont(w io.Writer, sf *Subfont) error {
+	// Write header: n[12] height[12] ascent[12]
+	hdr := fmt.Sprintf("%12d%12d%12d", sf.N, sf.Height, sf.Ascent)
+	if _, err := w.Write([]byte(hdr)); err != nil {
 		return err
 	}
+	// Write fontchar data
+	p := packInfo(sf.Info, sf.N)
+	_, err := w.Write(p)
+	return err
+}
 
-	// Write fontchar info
-	buf := make([]byte, 6)
-	for i := 0; i <= n && i < len(info); i++ {
-		binary.LittleEndian.PutUint16(buf[0:2], uint16(info[i].X))
-		buf[2] = info[i].Top
-		buf[3] = info[i].Bottom
-		buf[4] = byte(info[i].Left)
-		buf[5] = info[i].Width
-		_, err = f.Write(buf)
-		if err != nil {
-			return err
-		}
+// OpenSubfont opens a subfont file.
+func (d *Display) OpenSubfont(name string) (*Subfont, error) {
+	// Check cache first
+	sf := LookupSubfont(d, name)
+	if sf != nil {
+		return sf, nil
 	}
 
-	return nil
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open subfont: %s: %v", name, err)
+	}
+	defer f.Close()
+
+	return ReadSubfont(d, name, f)
+}
+
+// openSubfont is the internal version that returns nil on error.
+func (d *Display) openSubfont(name string) *Subfont {
+	sf, _ := d.OpenSubfont(name)
+	return sf
 }
 
 // CharWidth returns the width of character i in the subfont.
@@ -220,102 +241,7 @@ func (sf *Subfont) CharInfo(i int) *Fontchar {
 	return &sf.Info[i]
 }
 
-// ReadImage reads an image from a file.
-func (d *Display) ReadImage(f *os.File) (*Image, error) {
-	// Read image header
-	// Format: chan[12] r.min.x[12] r.min.y[12] r.max.x[12] r.max.y[12]
-	header := make([]byte, 5*12)
-	n, err := f.Read(header)
-	if err != nil {
-		return nil, err
-	}
-	if n < 5*12 {
-		return nil, fmt.Errorf("short image header")
-	}
-
-	chanstr := string(header[0:11])
-	pix := strtochan(chanstr)
-	if pix == 0 {
-		return nil, fmt.Errorf("bad channel string: %s", chanstr)
-	}
-
-	minx := atoi(string(header[12:23]))
-	miny := atoi(string(header[24:35]))
-	maxx := atoi(string(header[36:47]))
-	maxy := atoi(string(header[48:59]))
-
-	r := Rect(minx, miny, maxx, maxy)
-
-	// Allocate the image
-	img, err := d.AllocImage(r, pix, false, DTransparent)
-	if err != nil {
-		return nil, err
-	}
-
-	// Read and load image data
-	depth := chantodepth(pix)
-	bpl := bytesPerLine(r, depth)
-	data := make([]byte, bpl*r.Dy())
-	_, err = f.Read(data)
-	if err != nil {
-		img.Free()
-		return nil, err
-	}
-
-	_, err = img.Load(r, data)
-	if err != nil {
-		img.Free()
-		return nil, err
-	}
-
-	return img, nil
-}
-
-func atoi(s string) int {
-	// Parse number, ignoring leading/trailing whitespace
-	s = trimSpace(s)
-	n := 0
-	neg := false
-	if len(s) > 0 && s[0] == '-' {
-		neg = true
-		s = s[1:]
-	}
-	for _, c := range s {
-		if c >= '0' && c <= '9' {
-			n = n*10 + int(c-'0')
-		} else {
-			break
-		}
-	}
-	if neg {
-		return -n
-	}
-	return n
-}
-
-func trimSpace(s string) string {
-	start := 0
-	for start < len(s) && (s[start] == ' ' || s[start] == '\t') {
-		start++
-	}
-	end := len(s)
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
-		end--
-	}
-	return s[start:end]
-}
-
-func unitsPerLine(r Rectangle, d int, bitsperunit int) int {
-	if d <= 0 || d > 32 {
-		return 0
-	}
-	return (r.Max.X*d - (r.Min.X * d & -bitsperunit) + bitsperunit - 1) / bitsperunit
-}
-
-func wordsPerLine(r Rectangle, d int) int {
-	return unitsPerLine(r, d, 32) // 8*sizeof(uint32) = 32
-}
-
-func bytesPerLine(r Rectangle, d int) int {
-	return unitsPerLine(r, d, 8)
+// atoi12 parses a 12-char decimal string field (Plan 9 image format).
+func atoi12(b []byte) int {
+	return atoi(string(b))
 }

@@ -7,6 +7,11 @@ import (
 	"os"
 )
 
+// ReadImage reads an image from an *os.File.
+func (d *Display) ReadImage(f *os.File) (*Image, error) {
+	return d.ReadImageReader(f)
+}
+
 // ReadImageFile reads an image from a file by name.
 func (d *Display) ReadImageFile(name string) (*Image, error) {
 	f, err := os.Open(name)

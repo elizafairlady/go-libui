@@ -1,109 +1,180 @@
 package draw
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 )
 
+// Font cache constants from draw.h.
+const (
+	LOG2NFCACHE = 6
+	NFCACHE     = 1 << LOG2NFCACHE // 64, #chars cached
+	NFLOOK      = 5                // #chars to scan in cache
+	NFSUBF      = 2                // #subfonts to cache
+	MAXFCACHE   = 1024 + NFLOOK    // upper limit
+	MAXSUBF     = 50               // generous upper limit
+	DSUBF       = 4                // delta for subfont growth
+	SUBFAGE     = 10000            // expiry age for subfonts
+	CACHEAGE    = 10000            // expiry age for cache entries
+)
+
 // OpenFont opens a font file and returns a Font.
 func (d *Display) OpenFont(name string) (*Font, error) {
-	f, err := os.Open(name)
+	data, err := os.ReadFile(name)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-
-	return d.buildFont(f, name)
+	return d.BuildFont(data, name)
 }
 
-// buildFont parses a font file.
-func (d *Display) buildFont(r *os.File, name string) (*Font, error) {
-	scanner := bufio.NewScanner(r)
+// BuildFont parses a font description from buf and creates a Font.
+// This is a direct port of 9front's buildfont().
+func (d *Display) BuildFont(buf []byte, name string) (*Font, error) {
+	s := string(buf)
 
-	// First line: height ascent
-	if !scanner.Scan() {
-		return nil, fmt.Errorf("empty font file")
-	}
-	line := scanner.Text()
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return nil, fmt.Errorf("bad font header: %s", line)
-	}
-	height, err := strconv.Atoi(fields[0])
-	if err != nil {
-		return nil, fmt.Errorf("bad height: %v", err)
-	}
-	ascent, err := strconv.Atoi(fields[1])
-	if err != nil {
-		return nil, fmt.Errorf("bad ascent: %v", err)
-	}
-
-	font := &Font{
+	fnt := &Font{
 		Display: d,
 		Name:    name,
-		Height:  height,
-		Ascent:  ascent,
+		ncache:  NFCACHE + NFLOOK,
+		nsubf:   NFSUBF,
+		age:     1,
+	}
+	fnt.cache = make([]Cacheinfo, fnt.ncache)
+	fnt.subf = make([]Cachesubf, fnt.nsubf)
+
+	// Parse height and ascent
+	s = skipWhitespace(s)
+	h, rest, ok := parseInt(s)
+	if !ok {
+		return nil, fmt.Errorf("bad font format: expected height")
+	}
+	fnt.Height = h
+	s = skipWhitespace(rest)
+
+	a, rest, ok := parseInt(s)
+	if !ok {
+		return nil, fmt.Errorf("bad font format: expected ascent")
+	}
+	fnt.Ascent = a
+	s = skipWhitespace(rest)
+
+	if fnt.Height <= 0 || fnt.Ascent <= 0 {
+		return nil, fmt.Errorf("bad height or ascent in font file")
 	}
 
-	// Read subfont specifications
-	// Format: min max offset filename
-	// or: min max filename (offset=0)
-	for scanner.Scan() {
-		line := scanner.Text()
-		line = strings.TrimSpace(line)
-		if line == "" || line[0] == '#' {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
+	// Parse subfont ranges
+	for len(s) > 0 {
+		// Must be looking at a number
+		if s[0] < '0' || s[0] > '9' {
+			return nil, fmt.Errorf("bad font format: number expected")
 		}
 
-		min, err := strconv.ParseInt(fields[0], 0, 32)
-		if err != nil {
-			continue
+		min, rest, ok := parseInt(s)
+		if !ok {
+			return nil, fmt.Errorf("bad font format: min")
 		}
-		max, err := strconv.ParseInt(fields[1], 0, 32)
-		if err != nil {
-			continue
+		s = skipWhitespace(rest)
+
+		if len(s) == 0 || s[0] < '0' || s[0] > '9' {
+			return nil, fmt.Errorf("bad font format: max expected")
+		}
+		max, rest, ok := parseInt(s)
+		if !ok {
+			return nil, fmt.Errorf("bad font format: max")
+		}
+		s = skipWhitespace(rest)
+
+		if len(s) == 0 || min > 0x10FFFF || max > 0x10FFFF || min > max {
+			return nil, fmt.Errorf("illegal subfont range")
 		}
 
-		var offset int64
-		var filename string
-		if len(fields) >= 4 {
-			offset, _ = strconv.ParseInt(fields[2], 0, 32)
-			filename = fields[3]
+		// Try to parse offset: a number followed by whitespace
+		offset := 0
+		t := s
+		if n, rest2, ok := parseInt(t); ok && len(rest2) > 0 && (rest2[0] == ' ' || rest2[0] == '\t' || rest2[0] == '\n') {
+			offset = n
+			s = skipWhitespace(rest2)
+		}
+
+		// Parse filename (non-whitespace token)
+		end := 0
+		for end < len(s) && s[end] != ' ' && s[end] != '\n' && s[end] != '\t' && s[end] != 0 {
+			end++
+		}
+		if end == 0 {
+			return nil, fmt.Errorf("bad font format: missing filename")
+		}
+		filename := s[:end]
+		if end < len(s) {
+			s = skipWhitespace(s[end:])
 		} else {
-			filename = fields[2]
+			s = ""
 		}
 
 		cf := &Cachefont{
-			Min:    int(min),
-			Max:    int(max) + 1, // max is inclusive in font file
-			Offset: int(offset),
+			Min:    min,
+			Max:    max,
+			Offset: offset,
 			Name:   filename,
 		}
-		font.sub = append(font.sub, cf)
+		fnt.sub = append(fnt.sub, cf)
 	}
 
-	return font, nil
+	fnt.nsub = len(fnt.sub)
+	return fnt, nil
+}
+
+// Agefont increments the font age and renormalizes if needed.
+// This is a direct port of 9front's agefont().
+func (f *Font) Agefont() {
+	f.age++
+	if f.age == 65536 {
+		// Renormalize ages
+		for i := range f.cache {
+			if f.cache[i].age != 0 {
+				f.cache[i].age >>= 2
+				f.cache[i].age++
+			}
+		}
+		for i := range f.subf {
+			if f.subf[i].age != 0 {
+				if f.subf[i].age < SUBFAGE && f.subf[i].cf != nil && f.subf[i].cf.Name != "" {
+					// clean up
+					if f.Display == nil || f.subf[i].f != f.Display.DefaultSubfont {
+						f.subf[i].f.Free()
+					}
+					f.subf[i].cf = nil
+					f.subf[i].f = nil
+					f.subf[i].age = 0
+				} else {
+					f.subf[i].age >>= 2
+					f.subf[i].age++
+				}
+			}
+		}
+		f.age = (65536 >> 2) + 1
+	}
 }
 
 // Free releases the resources associated with a font.
+// This is a port of 9front's freefont().
 func (f *Font) Free() {
 	if f == nil {
 		return
 	}
-	// Free cached subfonts
+	for i := range f.sub {
+		f.sub[i] = nil
+	}
 	for i := range f.subf {
-		if f.subf[i].f != nil {
-			f.subf[i].f.Free()
+		s := f.subf[i].f
+		if s != nil {
+			if f.Display == nil || s != f.Display.DefaultSubfont {
+				s.Free()
+			}
 		}
 	}
-	// Free cache image
 	if f.cacheimage != nil {
 		f.cacheimage.Free()
 	}
@@ -112,54 +183,62 @@ func (f *Font) Free() {
 	f.sub = nil
 }
 
-// BuildFont builds a font from raw data.
-func (d *Display) BuildFont(data []byte, name string) (*Font, error) {
-	lines := strings.Split(string(data), "\n")
-	if len(lines) < 1 {
-		return nil, fmt.Errorf("empty font data")
+// skipWhitespace skips leading spaces, tabs, and newlines.
+func skipWhitespace(s string) string {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\n' || s[i] == '\t') {
+		i++
 	}
+	return s[i:]
+}
 
-	fields := strings.Fields(lines[0])
-	if len(fields) < 2 {
-		return nil, fmt.Errorf("bad font header")
+// parseInt parses a C-style integer (decimal, 0x hex, 0 octal).
+func parseInt(s string) (int, string, bool) {
+	if len(s) == 0 {
+		return 0, s, false
 	}
-	height, _ := strconv.Atoi(fields[0])
-	ascent, _ := strconv.Atoi(fields[1])
-
-	font := &Font{
-		Display: d,
-		Name:    name,
-		Height:  height,
-		Ascent:  ascent,
+	// Find the end of the number token
+	end := 0
+	if end < len(s) && (s[end] == '+' || s[end] == '-') {
+		end++
 	}
-
-	for _, line := range lines[1:] {
-		line = strings.TrimSpace(line)
-		if line == "" || line[0] == '#' {
-			continue
+	if end < len(s) && s[end] == '0' && end+1 < len(s) && (s[end+1] == 'x' || s[end+1] == 'X') {
+		end += 2
+		for end < len(s) && isHexDigit(s[end]) {
+			end++
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
+	} else if end < len(s) && s[end] == '0' {
+		for end < len(s) && s[end] >= '0' && s[end] <= '7' {
+			end++
 		}
-		min, _ := strconv.ParseInt(fields[0], 0, 32)
-		max, _ := strconv.ParseInt(fields[1], 0, 32)
-		var offset int64
-		var filename string
-		if len(fields) >= 4 {
-			offset, _ = strconv.ParseInt(fields[2], 0, 32)
-			filename = fields[3]
-		} else {
-			filename = fields[2]
+	} else {
+		for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+			end++
 		}
-		cf := &Cachefont{
-			Min:    int(min),
-			Max:    int(max) + 1,
-			Offset: int(offset),
-			Name:   filename,
-		}
-		font.sub = append(font.sub, cf)
 	}
+	if end == 0 {
+		return 0, s, false
+	}
+	n, err := strconv.ParseInt(s[:end], 0, 64)
+	if err != nil {
+		return 0, s, false
+	}
+	return int(n), s[end:], true
+}
 
-	return font, nil
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// SubfontName returns the subfont file name for a given font name and depth.
+func SubfontName(cfname, fname string, maxdepth int) string {
+	// Port of 9front subfontname()
+	if strings.HasPrefix(cfname, "/") {
+		return cfname
+	}
+	dir := ""
+	if idx := strings.LastIndex(fname, "/"); idx >= 0 {
+		dir = fname[:idx+1]
+	}
+	return dir + cfname
 }

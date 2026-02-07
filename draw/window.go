@@ -6,6 +6,139 @@ import (
 	"strconv"
 )
 
+// AllocScreen allocates a new screen on image with fill color.
+// Port of 9front allocscreen().
+func AllocScreen(image, fill *Image, public bool) (*Screen, error) {
+	d := image.Display
+	if d != fill.Display {
+		return nil, fmt.Errorf("allocscreen: image and fill on different displays")
+	}
+
+	s := &Screen{
+		Display: d,
+		Image:   image,
+		Fill:    fill,
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.imageid++
+	id := d.imageid
+	s.id = id
+
+	pub := byte(0)
+	if public {
+		pub = 1
+	}
+
+	a, err := d.bufimage(1 + 4 + 4 + 4 + 1)
+	if err != nil {
+		return nil, err
+	}
+	a[0] = 'A'
+	bplong(a[1:], uint32(id))
+	bplong(a[5:], uint32(image.id))
+	bplong(a[9:], uint32(fill.id))
+	a[13] = pub
+
+	if err := d.doflush(); err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+// TopWindow raises a window to the top of the stacking order.
+// Port of 9front topwindow().
+func (w *Image) TopWindow() {
+	if w == nil || w.Screen == nil {
+		return
+	}
+	TopNWindows([]*Image{w})
+}
+
+// BottomWindow lowers a window to the bottom of the stacking order.
+// Port of 9front bottomwindow().
+func (w *Image) BottomWindow() {
+	if w == nil || w.Screen == nil {
+		return
+	}
+	BottomNWindows([]*Image{w})
+}
+
+// TopNWindows raises n windows to the top.
+// Port of 9front topnwindows().
+func TopNWindows(w []*Image) {
+	topbottom(w, true)
+}
+
+// BottomNWindows lowers n windows to the bottom.
+// Port of 9front bottomnwindows().
+func BottomNWindows(w []*Image) {
+	topbottom(w, false)
+}
+
+// topbottom implements the window stacking order change.
+// Port of 9front topbottom().
+func topbottom(w []*Image, top bool) {
+	n := len(w)
+	if n <= 0 {
+		return
+	}
+	d := w[0].Display
+	for i := 1; i < n; i++ {
+		if w[i].Display != d {
+			return
+		}
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	a, err := d.bufimage(1 + 1 + 2 + 4*n)
+	if err != nil {
+		return
+	}
+	a[0] = 't'
+	if top {
+		a[1] = 1
+	} else {
+		a[1] = 0
+	}
+	bpshort(a[2:], uint16(n))
+	for i := 0; i < n; i++ {
+		bplong(a[4+4*i:], uint32(w[i].id))
+	}
+}
+
+// OriginWindow changes the origin of a window.
+// Port of 9front originwindow().
+func (w *Image) OriginWindow(log, scr Point) error {
+	if w == nil || w.Display == nil {
+		return nil
+	}
+	d := w.Display
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	a, err := d.bufimage(1 + 4 + 2*4 + 2*4)
+	if err != nil {
+		return err
+	}
+	a[0] = 'o'
+	bplong(a[1:], uint32(w.id))
+	bplong(a[5:], uint32(log.X))
+	bplong(a[9:], uint32(log.Y))
+	bplong(a[13:], uint32(scr.X))
+	bplong(a[17:], uint32(scr.Y))
+
+	delta := log.Sub(w.R.Min)
+	w.R = w.R.Add(delta)
+	w.Clipr = w.Clipr.Add(delta)
+	return nil
+}
+
 // GetWindow reads the window image from the display.
 // It is typically called after a resize event.
 // The ref argument specifies the refresh mode: Refbackup, Refnone, or Refmesg.
@@ -28,7 +161,6 @@ func (d *Display) gengetwindow(wctlname string, ref int) error {
 	}
 
 	// Parse window control line
-	// Format: id[11] minx[11] miny[11] maxx[11] maxy[11] ...
 	fields := parseCtlLine(string(buf[:n]))
 	if len(fields) < 5 {
 		return fmt.Errorf("bad wctl format")
@@ -46,14 +178,8 @@ func (d *Display) gengetwindow(wctlname string, ref int) error {
 		d.Windows.Free()
 	}
 
-	// Look up the named window image
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	// Use 'n' command to look up "noborder" or window name
-	// Format: 'n' id[4] nname[1] name[nname]
-	// Actually, for getwindow we just update the existing Window image
-	// by re-reading the ctl file
 
 	// Re-read ctl to refresh display image dimensions
 	_, err = d.ctlfd.Seek(0, 0)
@@ -106,7 +232,6 @@ func (d *Display) Namedimage(name string) (*Image, error) {
 		return nil, fmt.Errorf("name too long")
 	}
 
-	// Flush pending data so we don't get error allocating the image
 	if err := d.doflush(); err != nil {
 		return nil, err
 	}
@@ -123,7 +248,6 @@ func (d *Display) Namedimage(name string) (*Image, error) {
 	a[5] = byte(n)
 	copy(a[6:], name)
 
-	// Flush and read response from ctl
 	if err := d.doflush(); err != nil {
 		return nil, err
 	}
@@ -142,12 +266,8 @@ func (d *Display) Namedimage(name string) (*Image, error) {
 	if m < 12*12 {
 		return nil, fmt.Errorf("short read from ctl")
 	}
-	buf[12*12] = 0
 
-	// Parse the info
-	chanstr := string(buf[2*12 : 3*12])
-	chanstr = chanstr[:len(chanstr)-1] // trim trailing space
-
+	chanstr := trimSpace(string(buf[2*12 : 3*12]))
 	pix := strtochan(chanstr)
 	if pix == 0 {
 		return nil, fmt.Errorf("bad channel from devdraw: %s", chanstr)
@@ -160,7 +280,6 @@ func (d *Display) Namedimage(name string) (*Image, error) {
 		Depth:   chantodepth(pix),
 	}
 
-	// Parse repl and rectangle from ctl output
 	fields := parseCtlLine(string(buf[:m]))
 	if len(fields) >= 12 {
 		img.Repl = fields[3] == "1"
@@ -175,16 +294,4 @@ func (d *Display) Namedimage(name string) (*Image, error) {
 	}
 
 	return img, nil
-}
-
-// PublicScreen looks up a public screen by id.
-func (d *Display) PublicScreen(screenid int) (*Screen, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// Build the 'S' message to look up public screen
-	// Actually 'S' allocates a subfont; we need different approach
-	// Public screens are accessed via the image name mechanism
-
-	return nil, fmt.Errorf("not implemented")
 }

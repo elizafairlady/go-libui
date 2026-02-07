@@ -4,17 +4,25 @@ import (
 	"time"
 )
 
-// Event types for einit/eread
+// Event types for einit/eread.
 const (
 	Emouse    = 1
 	Ekeyboard = 2
 )
 
-// Event structure for legacy event interface
+// Event system limits from event.h.
+const (
+	MAXSLAVE = 32
+	EMAXMSG  = 128 + 8192 // size of 9p header + data
+)
+
+// Event structure matching 9front event.h.
 type Event struct {
-	Kbdc   rune
-	Mouse  Mouse
-	Screen *Image
+	Kbdc  rune
+	Mouse Mouse
+	N     int           // number of characters in message
+	V     interface{}   // data unpacked by general event-handling function
+	Data  [EMAXMSG]byte // message from an arbitrary file descriptor
 }
 
 // Eventctl manages the event system
@@ -35,13 +43,13 @@ func (d *Display) Einit(keys int) (*Eventctl, error) {
 
 	var err error
 	if keys&Emouse != 0 {
-		ec.Mouse, err = d.InitMouse()
+		ec.Mouse, err = InitMouse("", d.Image)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if keys&Ekeyboard != 0 {
-		ec.Keyboard, err = d.InitKeyboard()
+		ec.Keyboard, err = InitKeyboard("")
 		if err != nil {
 			if ec.Mouse != nil {
 				ec.Mouse.Close()

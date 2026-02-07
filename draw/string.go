@@ -254,7 +254,7 @@ func (f *Font) loadChar(r rune, d *Display) bool {
 		if cf == nil {
 			continue
 		}
-		if int(r) >= cf.Min && int(r) < cf.Max {
+		if int(r) >= cf.Min && int(r) <= cf.Max {
 			// Load the subfont if not already loaded
 			sf := f.lookupSubfont(cf, d)
 			if sf == nil {

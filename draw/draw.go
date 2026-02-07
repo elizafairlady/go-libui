@@ -362,6 +362,7 @@ type Font struct {
 	Height     int // line height
 	Ascent     int // height above baseline
 	width      int // of widest char (for snarf/paste optimization)
+	nsub       int // number of subfonts
 	age        uint32
 	maxdepth   int
 	ncache     int
@@ -430,13 +431,16 @@ type Mousectl struct {
 	C       chan Mouse
 	Resize  chan bool
 	Display *Display
-	file    *os.File
+	file    *os.File // mouse fd
+	cfd     *os.File // cursor fd
+	image   *Image   // associated window/display image
 }
 
 // Keyboardctl provides access to keyboard events.
 type Keyboardctl struct {
-	C    chan rune
-	file *os.File
+	C     chan rune
+	file  *os.File
+	ctlfd *os.File
 }
 
 // Menu for menuhit.
