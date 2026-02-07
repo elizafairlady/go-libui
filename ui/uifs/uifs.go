@@ -179,6 +179,37 @@ func (u *UIFS) recompute() {
 	}
 	u.rev++
 	u.tree = view.Serialize(root, u.rev)
+	u.populateBindings()
+}
+
+// populateBindings walks the tree and fills in bound values from state.
+// For textbox nodes with bind=X, sets text=state.Get(X).
+// For checkbox nodes with bind=X or bindchecked=X, sets checked from state.
+func (u *UIFS) populateBindings() {
+	if u.tree == nil {
+		return
+	}
+	for _, node := range u.tree.Nodes {
+		bindPath := node.Props["bind"]
+		if bindPath == "" {
+			continue
+		}
+		switch node.Type {
+		case "textbox":
+			// Auto-populate text from bound state
+			if _, explicit := node.Props["text"]; !explicit || node.Props["text"] == "" {
+				node.Props["text"] = u.st.Get(bindPath)
+			}
+		case "checkbox":
+			checkPath := node.Props["bindchecked"]
+			if checkPath == "" {
+				checkPath = bindPath
+			}
+			if _, explicit := node.Props["checked"]; !explicit {
+				node.Props["checked"] = u.st.Get(checkPath)
+			}
+		}
+	}
 }
 
 // SetState sets a state value and invalidates the tree.
