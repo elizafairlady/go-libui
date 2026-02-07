@@ -134,12 +134,12 @@ func (dst *Image) stringImpl(pt Point, src *Image, sp Point, f *Font, s string, 
 			subfontname = nil
 		}
 
-		d.mu.Lock()
+		// cachechars runs WITHOUT the display lock (matches C).
+		// loadchar/fontresize inside it take the lock only for bufimage calls.
 		n, wid, sfname := f.cachechars(sptr, rptr, cbuf, max)
 		subfontname = sfname
 
 		if n <= 0 {
-			d.mu.Unlock()
 			if n == 0 {
 				try++
 				if try > 10 {
@@ -159,17 +159,17 @@ func (dst *Image) stringImpl(pt Point, src *Image, sp Point, f *Font, s string, 
 				}
 			}
 			maxn--
-			d.mu.Unlock()
 			continue
 		}
 		try = 0
 
-		// Build 's' or 'x' protocol message
+		// Build 's' or 'x' protocol message — lock only for bufimage
 		m := 47 + 2*n
 		if bg != nil {
 			m += 4 + 2*4
 		}
 
+		d.mu.Lock()
 		b, err := bufimageop(d, m, op)
 		if err != nil {
 			d.mu.Unlock()
@@ -203,7 +203,6 @@ func (dst *Image) stringImpl(pt Point, src *Image, sp Point, f *Font, s string, 
 		for i := 0; i < n; i++ {
 			bpshort(b[off+2*i:], cbuf[i])
 		}
-
 		d.mu.Unlock()
 
 		pt.X += wid
@@ -309,7 +308,6 @@ func (f *Font) stringWidthImpl(s *string, r *[]rune, max int) int {
 		rptr = &rcopy
 	}
 
-	d := f.Display
 	for (sptr != nil && len(*sptr) > 0) || (rptr != nil && len(*rptr) > 0) {
 		if max <= 0 {
 			break
@@ -319,13 +317,7 @@ func (f *Font) stringWidthImpl(s *string, r *[]rune, max int) int {
 			m = max
 		}
 
-		if d != nil {
-			d.mu.Lock()
-		}
 		n, w, _ := f.cachechars(sptr, rptr, cbuf, m)
-		if d != nil {
-			d.mu.Unlock()
-		}
 
 		if n <= 0 {
 			// Skip one character

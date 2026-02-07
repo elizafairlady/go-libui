@@ -433,9 +433,12 @@ Found2:
 	}
 
 	d := f.Display
-	// Send 'l' command to load glyph into cache image
+	// Send 'l' command to load glyph into cache image.
+	// Lock only around bufimage, matching C's _lockdisplay/_unlockdisplay pattern.
+	d.mu.Lock()
 	b, err := d.bufimage(37)
 	if err != nil {
+		d.mu.Unlock()
 		return 0, nil
 	}
 
@@ -454,6 +457,7 @@ Found2:
 	bplong(b[31:], uint32(fi.Top))
 	b[35] = byte(fi.Left)
 	b[36] = fi.Width
+	d.mu.Unlock()
 
 	return 1, nil
 }
@@ -474,15 +478,19 @@ func (f *Font) fontresize(wid, ncache, depth int) bool {
 	}
 
 	{
+		// AllocImage takes its own lock
 		newimg, err := d.AllocImage(Rect(0, 0, ncache*wid, f.Height),
 			MakePix(CGrey, depth), false, 0)
 		if err != nil {
 			return false
 		}
 
-		// Send 'i' command: initialize font cache
+		// Send 'i' command: initialize font cache.
+		// Lock only around bufimage, matching C's _lockdisplay/_unlockdisplay.
+		d.mu.Lock()
 		b, err := d.bufimage(1 + 4 + 4 + 1)
 		if err != nil {
+			d.mu.Unlock()
 			newimg.Free()
 			return false
 		}
@@ -490,7 +498,9 @@ func (f *Font) fontresize(wid, ncache, depth int) bool {
 		bplong(b[1:], uint32(newimg.id))
 		bplong(b[5:], uint32(ncache))
 		b[9] = byte(f.Ascent)
+		d.mu.Unlock()
 
+		// Free takes its own lock
 		if f.cacheimage != nil {
 			f.cacheimage.Free()
 		}
