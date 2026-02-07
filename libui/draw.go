@@ -80,7 +80,7 @@ func NewDrawContext() (*DrawContext, error) {
 	// Read window name from /dev/winname and get the window image
 	winname, err := readWinname()
 	if err == nil && winname != "" {
-		// Use 'N' message to get the named window image
+		// Use 'n' message to look up the named window image
 		ctx.winID = ctx.nextID
 		ctx.nextID++
 		if err := ctx.namedImage(ctx.winID, winname); err != nil {
@@ -128,8 +128,8 @@ func readWinname() (string, error) {
 	return strings.TrimSpace(string(buf[:n])), nil
 }
 
-// namedImage sends the 'N' message to get a named image
-// N id[4] nname[1] name[nname]
+// namedImage sends the 'n' message to look up a named image
+// n id[4] j[1] name[j]
 func (c *DrawContext) namedImage(id int, name string) error {
 	nameBytes := []byte(name)
 	if len(nameBytes) > 255 {
@@ -137,7 +137,7 @@ func (c *DrawContext) namedImage(id int, name string) error {
 	}
 
 	buf := make([]byte, 1+4+1+len(nameBytes))
-	buf[0] = 'N'
+	buf[0] = 'n'
 	putlong(buf[1:], uint32(id))
 	buf[5] = byte(len(nameBytes))
 	copy(buf[6:], nameBytes)
