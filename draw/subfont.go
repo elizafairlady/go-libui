@@ -262,7 +262,7 @@ func (d *Display) ReadImage(f *os.File) (*Image, error) {
 		return nil, err
 	}
 
-	err = img.Load(r, data)
+	_, err = img.Load(r, data)
 	if err != nil {
 		img.Free()
 		return nil, err
@@ -305,14 +305,17 @@ func trimSpace(s string) string {
 	return s[start:end]
 }
 
-func bytesPerLine(r Rectangle, depth int) int {
-	if depth <= 0 {
+func unitsPerLine(r Rectangle, d int, bitsperunit int) int {
+	if d <= 0 || d > 32 {
 		return 0
 	}
-	w := r.Dx()
-	if w <= 0 {
-		return 0
-	}
-	bits := w * depth
-	return (bits + 7) / 8
+	return (r.Max.X*d - (r.Min.X * d & -bitsperunit) + bitsperunit - 1) / bitsperunit
+}
+
+func wordsPerLine(r Rectangle, d int) int {
+	return unitsPerLine(r, d, 32) // 8*sizeof(uint32) = 32
+}
+
+func bytesPerLine(r Rectangle, d int) int {
+	return unitsPerLine(r, d, 8)
 }

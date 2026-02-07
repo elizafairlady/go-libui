@@ -13,22 +13,20 @@ func (dst *Image) LineOp(p0, p1 Point, end0, end1, radius int, src *Image, sp Po
 	}
 	d := dst.Display
 
-	srcid := 0
-	if src != nil {
-		srcid = src.id
+	if src == nil {
+		src = d.Black
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Build the 'l' (line) or 'L' (line with op) message
-	// Format: 'l' dstid[4] p0[2*4] p1[2*4] end0[4] end1[4] radius[4] srcid[4] sp[2*4]
-	var a [1 + 4 + 2*4 + 2*4 + 4 + 4 + 4 + 4 + 2*4 + 1]byte
-	if op != SoverD {
-		a[0] = 'L'
-	} else {
-		a[0] = 'l'
+	// Format: 'L' dstid[4] p0[2*4] p1[2*4] end0[4] end1[4] radius[4] srcid[4] sp[2*4]
+	a, err := d.bufimageop(1+4+2*4+2*4+4+4+4+4+2*4, op)
+	if err != nil {
+		return
 	}
+
+	a[0] = 'L'
 	bplong(a[1:], uint32(dst.id))
 	bplong(a[5:], uint32(p0.X))
 	bplong(a[9:], uint32(p0.Y))
@@ -37,21 +35,24 @@ func (dst *Image) LineOp(p0, p1 Point, end0, end1, radius int, src *Image, sp Po
 	bplong(a[21:], uint32(end0))
 	bplong(a[25:], uint32(end1))
 	bplong(a[29:], uint32(radius))
-	bplong(a[33:], uint32(srcid))
+	bplong(a[33:], uint32(src.id))
 	bplong(a[37:], uint32(sp.X))
 	bplong(a[41:], uint32(sp.Y))
+}
 
-	n := 45
-	if op != SoverD {
-		a[n] = byte(op)
-		n++
+// addcoord appends a compressed coordinate delta to buf.
+// Returns the number of bytes written.
+func addcoord(buf []byte, oldx, newx int) int {
+	dx := newx - oldx
+	// does dx fit in 7 signed bits?
+	if uint(dx-(-0x40)) <= 0x7F {
+		buf[0] = byte(dx) & 0x7F
+		return 1
 	}
-
-	if err := d.flushBuffer(n); err != nil {
-		return
-	}
-	copy(d.buf[d.bufsize:], a[:n])
-	d.bufsize += n
+	buf[0] = 0x80 | byte(newx&0x7F)
+	buf[1] = byte(newx >> 7)
+	buf[2] = byte(newx >> 15)
+	return 3
 }
 
 // Poly draws a polygon connecting the points.
@@ -66,54 +67,14 @@ func (dst *Image) PolyOp(p []Point, end0, end1, radius int, src *Image, sp Point
 	}
 	d := dst.Display
 
-	srcid := 0
-	if src != nil {
-		srcid = src.id
+	if src == nil {
+		src = d.Black
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Build the 'p' (poly) or 'P' (poly with op) message
-	// Format: 'p' dstid[4] n[2] end0[4] end1[4] radius[4] srcid[4] sp[2*4] p[n][2*4]
-	headerSize := 1 + 4 + 2 + 4 + 4 + 4 + 4 + 2*4
-	if op != SoverD {
-		headerSize++ // op byte
-	}
-	totalSize := headerSize + len(p)*8
-
-	if err := d.flushBuffer(totalSize); err != nil {
-		return
-	}
-
-	buf := d.buf[d.bufsize:]
-	if op != SoverD {
-		buf[0] = 'P'
-	} else {
-		buf[0] = 'p'
-	}
-	bplong(buf[1:], uint32(dst.id))
-	bpshort(buf[5:], uint16(len(p)))
-	bplong(buf[7:], uint32(end0))
-	bplong(buf[11:], uint32(end1))
-	bplong(buf[15:], uint32(radius))
-	bplong(buf[19:], uint32(srcid))
-	bplong(buf[23:], uint32(sp.X))
-	bplong(buf[27:], uint32(sp.Y))
-
-	off := 31
-	if op != SoverD {
-		buf[off] = byte(op)
-		off++
-	}
-
-	for _, pt := range p {
-		bplong(buf[off:], uint32(pt.X))
-		bplong(buf[off+4:], uint32(pt.Y))
-		off += 8
-	}
-
-	d.bufsize += totalSize
+	d.dopoly('p', dst, p, end0, end1, radius, src, sp, op)
 }
 
 // FillPoly fills a polygon.
@@ -128,53 +89,159 @@ func (dst *Image) FillPolyOp(p []Point, wind int, src *Image, sp Point, op Op) {
 	}
 	d := dst.Display
 
-	srcid := 0
-	if src != nil {
-		srcid = src.id
+	if src == nil {
+		src = d.Black
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Build the 'P' (fill poly) message with wind instead of end styles
-	// Actually use 'y' for filled polygon
-	headerSize := 1 + 4 + 2 + 4 + 4 + 2*4
-	if op != SoverD {
-		headerSize++
-	}
-	totalSize := headerSize + len(p)*8
+	d.dopoly('P', dst, p, wind, 0, 0, src, sp, op)
+}
 
-	if err := d.flushBuffer(totalSize); err != nil {
+// dopoly issues a poly draw command with compressed point encoding.
+func (d *Display) dopoly(cmd byte, dst *Image, pp []Point, end0, end1, radius int, src *Image, sp Point, op Op) {
+	if len(pp) == 0 {
 		return
 	}
 
-	buf := d.buf[d.bufsize:]
-	buf[0] = 'y'
-	bplong(buf[1:], uint32(dst.id))
-	bpshort(buf[5:], uint16(len(p)))
-	bplong(buf[7:], uint32(wind))
-	bplong(buf[11:], uint32(srcid))
-	bplong(buf[15:], uint32(sp.X))
-	bplong(buf[19:], uint32(sp.Y))
-
-	off := 23
-	if op != SoverD {
-		buf[off] = byte(op)
-		off++
+	// Encode points with addcoord compression
+	// Each point can take at most 6 bytes (3 for x + 3 for y)
+	t := make([]byte, len(pp)*6)
+	u := 0
+	ox, oy := 0, 0
+	for _, p := range pp {
+		n := addcoord(t[u:], ox, p.X)
+		u += n
+		ox = p.X
+		n = addcoord(t[u:], oy, p.Y)
+		u += n
+		oy = p.Y
 	}
 
-	for _, pt := range p {
-		bplong(buf[off:], uint32(pt.X))
-		bplong(buf[off+4:], uint32(pt.Y))
-		off += 8
+	a, err := d.bufimageop(1+4+2+4+4+4+4+2*4+u, op)
+	if err != nil {
+		return
 	}
 
-	d.bufsize += totalSize
+	a[0] = cmd
+	bplong(a[1:], uint32(dst.id))
+	bpshort(a[5:], uint16(len(pp)-1))
+	bplong(a[7:], uint32(end0))
+	bplong(a[11:], uint32(end1))
+	bplong(a[15:], uint32(radius))
+	bplong(a[19:], uint32(src.id))
+	bplong(a[23:], uint32(sp.X))
+	bplong(a[27:], uint32(sp.Y))
+	copy(a[31:], t[:u])
+}
+
+// plist is used internally for converting bezier curves to point lists.
+type plist struct {
+	p []Point
+}
+
+func (l *plist) append(p Point) {
+	l.p = append(l.p, p)
+}
+
+func normsq(p Point) int {
+	return p.X*p.X + p.Y*p.Y
+}
+
+func psdist(p, a, b Point) int {
+	p = p.Sub(a)
+	b = b.Sub(a)
+	num := p.X*b.X + p.Y*b.Y
+	if num <= 0 {
+		return normsq(p)
+	}
+	den := normsq(b)
+	if num >= den {
+		return normsq(b.Sub(p))
+	}
+	return normsq(b.Mul(num).Div(den).Sub(p))
+}
+
+func bpts1(l *plist, p0, p1, p2, p3 Point, scale int) {
+	tp0 := p0.Div(scale)
+	tp1 := p1.Div(scale)
+	tp2 := p2.Div(scale)
+	tp3 := p3.Div(scale)
+	if psdist(tp1, tp0, tp3) <= 1 && psdist(tp2, tp0, tp3) <= 1 {
+		l.append(tp0)
+		l.append(tp1)
+		l.append(tp2)
+	} else {
+		if scale > (1 << 12) {
+			p0 = tp0
+			p1 = tp1
+			p2 = tp2
+			p3 = tp3
+			scale = 1
+		}
+		p01 := p0.Add(p1)
+		p12 := p1.Add(p2)
+		p23 := p2.Add(p3)
+		p012 := p01.Add(p12)
+		p123 := p12.Add(p23)
+		p0123 := p012.Add(p123)
+		bpts1(l, p0.Mul(8), p01.Mul(4), p012.Mul(2), p0123, scale*8)
+		bpts1(l, p0123, p123.Mul(2), p23.Mul(4), p3.Mul(8), scale*8)
+	}
+}
+
+func bpts(l *plist, p0, p1, p2, p3 Point) {
+	bpts1(l, p0, p1, p2, p3, 1)
+}
+
+func bezierpts(l *plist, p0, p1, p2, p3 Point) {
+	bpts(l, p0, p1, p2, p3)
+	l.append(p3)
+}
+
+func bezsplinepts(l *plist, pt []Point) {
+	npt := len(pt)
+	if npt < 3 {
+		return
+	}
+	ep := npt - 3
+	periodic := pt[0].Eq(pt[ep+2])
+
+	if periodic {
+		a := pt[ep+1].Add(pt[0]).Div(2)
+		b := pt[ep+1].Add(pt[0].Mul(5)).Div(6)
+		c := pt[0].Mul(5).Add(pt[1]).Div(6)
+		dd := pt[0].Add(pt[1]).Div(2)
+		bpts(l, a, b, c, dd)
+	}
+
+	var lastd Point
+	for i := 0; i <= ep; i++ {
+		var a, b, c, dd Point
+		if i == 0 && !periodic {
+			a = pt[0]
+			b = pt[0].Add(pt[1].Mul(2)).Div(3)
+		} else {
+			a = pt[i].Add(pt[i+1]).Div(2)
+			b = pt[i].Add(pt[i+1].Mul(5)).Div(6)
+		}
+		if i == ep && !periodic {
+			c = pt[i+1].Mul(2).Add(pt[i+2]).Div(3)
+			dd = pt[i+2]
+		} else {
+			c = pt[i+1].Mul(5).Add(pt[i+2]).Div(6)
+			dd = pt[i+1].Add(pt[i+2]).Div(2)
+		}
+		bpts(l, a, b, c, dd)
+		lastd = dd
+	}
+	l.append(lastd)
 }
 
 // Bezier draws a cubic Bezier curve.
-func (dst *Image) Bezier(a, b, c, d Point, end0, end1, radius int, src *Image, sp Point) {
-	dst.BezierOp(a, b, c, d, end0, end1, radius, src, sp, SoverD)
+func (dst *Image) Bezier(a, b, c, dd Point, end0, end1, radius int, src *Image, sp Point) {
+	dst.BezierOp(a, b, c, dd, end0, end1, radius, src, sp, SoverD)
 }
 
 // BezierOp is Bezier with a compositing operator.
@@ -182,70 +249,12 @@ func (dst *Image) BezierOp(a, b, c, dd Point, end0, end1, radius int, src *Image
 	if dst == nil || dst.Display == nil {
 		return
 	}
-	d := dst.Display
-
-	srcid := 0
-	if src != nil {
-		srcid = src.id
-	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// Build the 'z' (bezier) message
-	// Format: 'z' dstid[4] a[2*4] b[2*4] c[2*4] d[2*4] end0[4] end1[4] radius[4] srcid[4] sp[2*4]
-	var msg [1 + 4 + 4*2*4 + 4 + 4 + 4 + 4 + 2*4 + 1]byte
-	if op != SoverD {
-		msg[0] = 'Z'
-	} else {
-		msg[0] = 'z'
-	}
-	bplong(msg[1:], uint32(dst.id))
-	bplong(msg[5:], uint32(a.X))
-	bplong(msg[9:], uint32(a.Y))
-	bplong(msg[13:], uint32(b.X))
-	bplong(msg[17:], uint32(b.Y))
-	bplong(msg[21:], uint32(c.X))
-	bplong(msg[25:], uint32(c.Y))
-	bplong(msg[29:], uint32(dd.X))
-	bplong(msg[33:], uint32(dd.Y))
-	bplong(msg[37:], uint32(end0))
-	bplong(msg[41:], uint32(end1))
-	bplong(msg[45:], uint32(radius))
-	bplong(msg[49:], uint32(srcid))
-	bplong(msg[53:], uint32(sp.X))
-	bplong(msg[57:], uint32(sp.Y))
-
-	n := 61
-	if op != SoverD {
-		msg[n] = byte(op)
-		n++
-	}
-
-	if err := d.flushBuffer(n); err != nil {
+	var l plist
+	bezierpts(&l, a, b, c, dd)
+	if len(l.p) == 0 {
 		return
 	}
-	copy(d.buf[d.bufsize:], msg[:n])
-	d.bufsize += n
-}
-
-// BezSpline draws a bezier spline through the given points.
-func (dst *Image) BezSpline(p []Point, end0, end1, radius int, src *Image, sp Point) {
-	dst.BezSplineOp(p, end0, end1, radius, src, sp, SoverD)
-}
-
-// BezSplineOp is BezSpline with a compositing operator.
-func (dst *Image) BezSplineOp(p []Point, end0, end1, radius int, src *Image, sp Point, op Op) {
-	if dst == nil || dst.Display == nil || len(p) < 3 {
-		return
-	}
-
-	// Convert bezier spline control points to cubic bezier segments
-	// and draw each segment
-	// B-spline to Bezier conversion for cubic splines
-	for i := 0; i+3 <= len(p); i += 3 {
-		dst.BezierOp(p[i], p[i+1], p[i+2], p[(i+3)%len(p)], end0, end1, radius, src, sp, op)
-	}
+	dst.PolyOp(l.p, end0, end1, radius, src, sp.Add(a.Sub(l.p[0])), op)
 }
 
 // FillBezier fills a region bounded by a bezier curve.
@@ -255,9 +264,33 @@ func (dst *Image) FillBezier(a, b, c, dd Point, wind int, src *Image, sp Point) 
 
 // FillBezierOp is FillBezier with a compositing operator.
 func (dst *Image) FillBezierOp(a, b, c, dd Point, wind int, src *Image, sp Point, op Op) {
-	// Approximate with filled polygon
-	pts := bezierToPoints(a, b, c, dd, 16)
-	dst.FillPolyOp(pts, wind, src, sp, op)
+	if dst == nil || dst.Display == nil {
+		return
+	}
+	var l plist
+	bezierpts(&l, a, b, c, dd)
+	if len(l.p) == 0 {
+		return
+	}
+	dst.FillPolyOp(l.p, wind, src, sp.Add(a.Sub(l.p[0])), op)
+}
+
+// BezSpline draws a bezier spline through the given points.
+func (dst *Image) BezSpline(p []Point, end0, end1, radius int, src *Image, sp Point) {
+	dst.BezSplineOp(p, end0, end1, radius, src, sp, SoverD)
+}
+
+// BezSplineOp is BezSpline with a compositing operator.
+func (dst *Image) BezSplineOp(pts []Point, end0, end1, radius int, src *Image, sp Point, op Op) {
+	if dst == nil || dst.Display == nil || len(pts) < 3 {
+		return
+	}
+	var l plist
+	bezsplinepts(&l, pts)
+	if len(l.p) == 0 {
+		return
+	}
+	dst.PolyOp(l.p, end0, end1, radius, src, sp.Add(pts[0].Sub(l.p[0])), op)
 }
 
 // FillBezSpline fills a region bounded by a bezier spline.
@@ -266,33 +299,14 @@ func (dst *Image) FillBezSpline(p []Point, wind int, src *Image, sp Point) {
 }
 
 // FillBezSplineOp is FillBezSpline with a compositing operator.
-func (dst *Image) FillBezSplineOp(p []Point, wind int, src *Image, sp Point, op Op) {
-	if len(p) < 4 {
+func (dst *Image) FillBezSplineOp(pts []Point, wind int, src *Image, sp Point, op Op) {
+	if dst == nil || dst.Display == nil || len(pts) < 3 {
 		return
 	}
-	// Approximate spline with polygon
-	var pts []Point
-	for i := 0; i+3 <= len(p); i += 3 {
-		seg := bezierToPoints(p[i], p[i+1], p[i+2], p[(i+3)%len(p)], 16)
-		pts = append(pts, seg...)
+	var l plist
+	bezsplinepts(&l, pts)
+	if len(l.p) == 0 {
+		return
 	}
-	dst.FillPolyOp(pts, wind, src, sp, op)
-}
-
-// bezierToPoints converts a cubic bezier to a series of points.
-func bezierToPoints(a, b, c, d Point, n int) []Point {
-	pts := make([]Point, n+1)
-	for i := 0; i <= n; i++ {
-		t := float64(i) / float64(n)
-		t2 := t * t
-		t3 := t2 * t
-		mt := 1 - t
-		mt2 := mt * mt
-		mt3 := mt2 * mt
-
-		x := mt3*float64(a.X) + 3*mt2*t*float64(b.X) + 3*mt*t2*float64(c.X) + t3*float64(d.X)
-		y := mt3*float64(a.Y) + 3*mt2*t*float64(b.Y) + 3*mt*t2*float64(c.Y) + t3*float64(d.Y)
-		pts[i] = Pt(int(x+0.5), int(y+0.5))
-	}
-	return pts
+	dst.FillPolyOp(l.p, wind, src, sp.Add(pts[0].Sub(l.p[0])), op)
 }

@@ -75,7 +75,7 @@ func (d *Display) Creadimage(f io.Reader) (*Image, error) {
 		return nil, err
 	}
 
-	err = img.Load(r, data)
+	_, err = img.Load(r, data)
 	if err != nil {
 		img.Free()
 		return nil, err

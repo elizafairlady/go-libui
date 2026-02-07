@@ -4,6 +4,16 @@ import (
 	"strings"
 )
 
+// Channel descriptor encoding matches 9front's libdraw exactly.
+// Each channel occupies one byte: (type<<4)|nbits
+// Channels are packed from MSB to LSB in order of the string representation.
+//
+// TYPE(v) = (v>>4)&0xF
+// NBITS(v) = v&0xF
+// __DC(t,n) = (t<<4)|n
+
+var channames = "rgbkamx"
+
 // strtochan converts a channel format string to a Pix value.
 // Format strings are like "r8g8b8" or "m8" or "k8".
 func strtochan(s string) Pix {
@@ -12,120 +22,70 @@ func strtochan(s string) Pix {
 		return 0
 	}
 
-	var pix Pix
-	shift := uint(0)
+	var c Pix
+	d := 0
 
-	for len(s) > 0 {
-		var t int
-		switch s[0] {
-		case 'r':
-			t = CRed
-		case 'g':
-			t = CGreen
-		case 'b':
-			t = CBlue
-		case 'k':
-			t = CGrey
-		case 'a':
-			t = CAlpha
-		case 'm':
-			t = CMap
-		case 'x':
-			t = CIgnore
-		default:
+	for len(s) > 0 && s[0] != ' ' && s[0] != '\t' && s[0] != '\n' {
+		idx := strings.IndexByte(channames, s[0])
+		if idx < 0 {
 			return 0
 		}
+		t := idx
 		s = s[1:]
-
-		// Parse the depth
 		if len(s) == 0 || s[0] < '0' || s[0] > '9' {
 			return 0
 		}
-		d := 0
-		for len(s) > 0 && s[0] >= '0' && s[0] <= '9' {
-			d = d*10 + int(s[0]-'0')
-			s = s[1:]
-		}
-		if d < 1 || d > 8 {
-			return 0
-		}
-
-		pix |= Pix((t+1)<<shift | d<<(shift+4))
-		shift += 8
-		if shift >= 32 {
-			break
-		}
+		n := int(s[0] - '0')
+		s = s[1:]
+		d += n
+		c = (c << 8) | Pix((t<<4)|n)
 	}
-
-	return pix
+	if d == 0 || (d > 8 && d%8 != 0) || (d < 8 && 8%d != 0) {
+		return 0
+	}
+	return c
 }
 
 // chantostr converts a Pix value to a channel format string.
-func chantostr(pix Pix) string {
-	if pix == 0 {
+func chantostr(cc Pix) string {
+	if chantodepth(cc) == 0 {
 		return ""
 	}
 
-	names := "rgbkamx"
-	var buf strings.Builder
-
-	for shift := uint(0); shift < 32; shift += 8 {
-		t := int((pix >> shift) & 0xF)
-		d := int((pix >> (shift + 4)) & 0xF)
-		if t == 0 || d == 0 {
-			break
-		}
-		t-- // convert back from 1-based
-		if t >= len(names) {
-			return ""
-		}
-		buf.WriteByte(names[t])
-		if d > 9 {
-			buf.WriteByte('1')
-			buf.WriteByte('0' + byte(d-10))
-		} else {
-			buf.WriteByte('0' + byte(d))
-		}
+	// Reverse the channel descriptor
+	var rc Pix
+	for c := cc; c != 0; c >>= 8 {
+		rc <<= 8
+		rc |= c & 0xFF
 	}
 
-	return buf.String()
+	var buf []byte
+	for c := rc; c != 0; c >>= 8 {
+		t := (c >> 4) & 0xF
+		n := c & 0xF
+		if int(t) >= len(channames) {
+			return ""
+		}
+		buf = append(buf, channames[t])
+		buf = append(buf, '0'+byte(n))
+	}
+	return string(buf)
 }
 
 // chantodepth returns the total bits per pixel for a channel format.
-func chantodepth(pix Pix) int {
-	if pix == 0 {
+func chantodepth(c Pix) int {
+	n := 0
+	for c != 0 {
+		t := (c >> 4) & 0xF
+		nb := c & 0xF
+		if t >= NChan || nb > 8 || nb <= 0 {
+			return 0
+		}
+		n += int(nb)
+		c >>= 8
+	}
+	if n == 0 || (n > 8 && n%8 != 0) || (n < 8 && 8%n != 0) {
 		return 0
 	}
-
-	depth := 0
-	for shift := uint(0); shift < 32; shift += 8 {
-		d := int((pix >> (shift + 4)) & 0xF)
-		if d == 0 {
-			break
-		}
-		depth += d
-	}
-
-	return depth
-}
-
-// chandepth returns the depth of a specific channel type in a pixel format.
-func chandepth(pix Pix, ch int) int {
-	for shift := uint(0); shift < 32; shift += 8 {
-		t := int((pix >> shift) & 0xF)
-		d := int((pix >> (shift + 4)) & 0xF)
-		if t == 0 || d == 0 {
-			break
-		}
-		if t-1 == ch {
-			return d
-		}
-	}
-	return 0
-}
-
-// unit returns the byte width containing all channels for a pixel format.
-func unit(pix Pix) int {
-	depth := chantodepth(pix)
-	return (depth + 7) / 8
+	return n
 }

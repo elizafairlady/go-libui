@@ -101,66 +101,80 @@ func (d *Display) Namedimage(name string) (*Image, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if len(name) >= 256 {
+	n := len(name)
+	if n >= 256 {
 		return nil, fmt.Errorf("name too long")
 	}
 
-	// Build the 'n' message
-	// Format: 'n' dstid[4] nname[1] name[nname]
-	// Returns image info if found
+	// Flush pending data so we don't get error allocating the image
+	if err := d.doflush(); err != nil {
+		return nil, err
+	}
 
-	id := d.imageid
 	d.imageid++
+	id := d.imageid
 
-	var a [1 + 4 + 1]byte
-	a[0] = 'n'
-	bplong(a[1:], uint32(id))
-	a[5] = byte(len(name))
-
-	if err := d.flushBuffer(len(a) + len(name)); err != nil {
-		return nil, err
-	}
-	copy(d.buf[d.bufsize:], a[:])
-	d.bufsize += len(a)
-	copy(d.buf[d.bufsize:], name)
-	d.bufsize += len(name)
-
-	// Flush and read response
-	if err := d.flush(false); err != nil {
-		return nil, err
-	}
-
-	// Read response from data - contains image info
-	// Format: chan[4] repl[1] r[4*4] clipr[4*4]
-	buf := make([]byte, 4+1+16+16)
-	n, err := d.datafd.Read(buf)
+	a, err := d.bufimage(1 + 4 + 1 + n)
 	if err != nil {
 		return nil, err
 	}
-	if n < len(buf) {
-		return nil, fmt.Errorf("short read from data")
+	a[0] = 'n'
+	bplong(a[1:], uint32(id))
+	a[5] = byte(n)
+	copy(a[6:], name)
+
+	// Flush and read response from ctl
+	if err := d.doflush(); err != nil {
+		return nil, err
 	}
 
-	pix := Pix(glong(buf[0:]))
-	repl := buf[4] != 0
-	minx := int(int32(glong(buf[5:])))
-	miny := int(int32(glong(buf[9:])))
-	maxx := int(int32(glong(buf[13:])))
-	maxy := int(int32(glong(buf[17:])))
-	cminx := int(int32(glong(buf[21:])))
-	cminy := int(int32(glong(buf[25:])))
-	cmaxx := int(int32(glong(buf[29:])))
-	cmaxy := int(int32(glong(buf[33:])))
+	// Re-read ctl to get image info
+	_, err = d.ctlfd.Seek(0, 0)
+	if err != nil {
+		return nil, err
+	}
 
-	return &Image{
+	buf := make([]byte, 12*12+1)
+	m, err := d.ctlfd.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	if m < 12*12 {
+		return nil, fmt.Errorf("short read from ctl")
+	}
+	buf[12*12] = 0
+
+	// Parse the info
+	chanstr := string(buf[2*12 : 3*12])
+	chanstr = chanstr[:len(chanstr)-1] // trim trailing space
+
+	pix := strtochan(chanstr)
+	if pix == 0 {
+		return nil, fmt.Errorf("bad channel from devdraw: %s", chanstr)
+	}
+
+	img := &Image{
 		Display: d,
 		id:      id,
 		Pix:     pix,
 		Depth:   chantodepth(pix),
-		Repl:    repl,
-		R:       Rect(minx, miny, maxx, maxy),
-		Clipr:   Rect(cminx, cminy, cmaxx, cmaxy),
-	}, nil
+	}
+
+	// Parse repl and rectangle from ctl output
+	fields := parseCtlLine(string(buf[:m]))
+	if len(fields) >= 12 {
+		img.Repl = fields[3] == "1"
+		img.R.Min.X, _ = strconv.Atoi(fields[4])
+		img.R.Min.Y, _ = strconv.Atoi(fields[5])
+		img.R.Max.X, _ = strconv.Atoi(fields[6])
+		img.R.Max.Y, _ = strconv.Atoi(fields[7])
+		img.Clipr.Min.X, _ = strconv.Atoi(fields[8])
+		img.Clipr.Min.Y, _ = strconv.Atoi(fields[9])
+		img.Clipr.Max.X, _ = strconv.Atoi(fields[10])
+		img.Clipr.Max.Y, _ = strconv.Atoi(fields[11])
+	}
+
+	return img, nil
 }
 
 // PublicScreen looks up a public screen by id.

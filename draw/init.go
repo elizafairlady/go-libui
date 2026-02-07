@@ -23,11 +23,17 @@ func InitDraw(errfn func(string), fontname, label, windir string) (*Display, err
 }
 
 func geninitdraw(devdir string, errfn func(string), fontname, label, windir string, scalable bool) (*Display, error) {
+	if windir == "" {
+		windir = devdir
+	}
 	d := &Display{
 		Error:   errfn,
 		bufsize: drawBufSize,
+		bufp:    0, // buffer starts empty
+		devdir:  devdir,
+		windir:  windir,
 	}
-	d.buf = make([]byte, d.bufsize+5) // 5 for flush message
+	d.buf = make([]byte, d.bufsize+5) // +5 for flush message
 
 	// Open /dev/draw/new to get a connection
 	ctlpath := devdir + "/draw/new"
@@ -51,6 +57,7 @@ func geninitdraw(devdir string, errfn func(string), fontname, label, windir stri
 	}
 
 	// Parse the control reply
+	// Format: dirno[12] ?[12] chan[12] repl[12] r.min.x[12] r.min.y[12] r.max.x[12] r.max.y[12] clipr.min.[12]x clipr.min.y[12] clipr.max.x[12] clipr.max.y[12]
 	fields := parseCtlLine(string(buf[:n]))
 	if len(fields) < 12 {
 		d.ctlfd.Close()
@@ -58,20 +65,21 @@ func geninitdraw(devdir string, errfn func(string), fontname, label, windir stri
 	}
 
 	d.dirno, _ = strconv.Atoi(fields[0])
-	// fields[1] is the image id of the display
-	imageid, _ := strconv.Atoi(fields[1])
+	// NOTE: fields[1] is not used (some implementations have DPI or other info)
+	// The display image always has id 0
 	// fields[2] is the channel format string
 	chanstr := fields[2]
-	// fields[3..6] are the display rectangle
-	minx, _ := strconv.Atoi(fields[3])
-	miny, _ := strconv.Atoi(fields[4])
-	maxx, _ := strconv.Atoi(fields[5])
-	maxy, _ := strconv.Atoi(fields[6])
-	// fields[7..10] are the clip rectangle
-	clipminx, _ := strconv.Atoi(fields[7])
-	clipminy, _ := strconv.Atoi(fields[8])
-	clipmaxx, _ := strconv.Atoi(fields[9])
-	clipmaxy, _ := strconv.Atoi(fields[10])
+	// fields[3] is the repl flag (but for display image we ignore it)
+	// fields[4..7] are the display rectangle
+	minx, _ := strconv.Atoi(fields[4])
+	miny, _ := strconv.Atoi(fields[5])
+	maxx, _ := strconv.Atoi(fields[6])
+	maxy, _ := strconv.Atoi(fields[7])
+	// fields[8..11] are the clip rectangle
+	clipminx, _ := strconv.Atoi(fields[8])
+	clipminy, _ := strconv.Atoi(fields[9])
+	clipmaxx, _ := strconv.Atoi(fields[10])
+	clipmaxy, _ := strconv.Atoi(fields[11])
 
 	// Open data file
 	datapath := fmt.Sprintf("%s/draw/%d/data", devdir, d.dirno)
@@ -86,10 +94,11 @@ func geninitdraw(devdir string, errfn func(string), fontname, label, windir stri
 	d.reffd, _ = os.Open(refpath) // ignore error, not all systems have it
 
 	// Create the display image
+	// The display image always has id 0
 	pix := strtochan(chanstr)
 	d.Image = &Image{
 		Display: d,
-		id:      imageid,
+		id:      0,
 		Pix:     pix,
 		Depth:   chantodepth(pix),
 		R:       Rect(minx, miny, maxx, maxy),
@@ -156,13 +165,18 @@ func (d *Display) Close() error {
 
 // SetLabel sets the window title.
 func (d *Display) SetLabel(label string) error {
-	// Try to write to /dev/wctl
-	wctl, err := os.OpenFile("/dev/wctl", os.O_WRONLY, 0)
+	// Write label file in windir
+	path := d.windir + "/label"
+	fd, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
-		return err
+		// Try creating it
+		fd, err = os.Create(path)
+		if err != nil {
+			return err
+		}
 	}
-	defer wctl.Close()
-	_, err = fmt.Fprintf(wctl, "label %s", label)
+	defer fd.Close()
+	_, err = fd.WriteString(label)
 	return err
 }
 
@@ -173,29 +187,42 @@ func (d *Display) Flush() error {
 	return d.flush(true)
 }
 
-func (d *Display) flush(visible bool) error {
-	if d.bufsize == 0 {
+func (d *Display) doflush() error {
+	if d.bufp <= 0 {
 		return nil
 	}
-	// Add flush command
-	n := d.bufsize
-	if n > len(d.buf)-5 {
-		n = len(d.buf) - 5
+	n, err := d.datafd.Write(d.buf[:d.bufp])
+	if err != nil || n != d.bufp {
+		d.bufp = 0 // reset anyway to try to recover
+		return err
 	}
-	// 'v' command: visible flush
-	d.buf[n] = 'v'
-	n++
-	_, err := d.datafd.Write(d.buf[:n])
-	d.bufsize = 0
-	return err
+	d.bufp = 0
+	return nil
 }
 
-// flushBuffer ensures there's room for n more bytes in the buffer.
-func (d *Display) flushBuffer(n int) error {
-	if d.bufsize+n > len(d.buf)-5 {
-		return d.flush(false)
+func (d *Display) flush(visible bool) error {
+	if visible {
+		// Add 'v' command for visible flush
+		d.buf[d.bufp] = 'v'
+		d.bufp++
 	}
-	return nil
+	return d.doflush()
+}
+
+// bufimage reserves n bytes in the draw buffer.
+// Returns a slice to write the command into.
+func (d *Display) bufimage(n int) ([]byte, error) {
+	if n < 0 || n > d.bufsize {
+		return nil, fmt.Errorf("bad count in bufimage: %d", n)
+	}
+	if d.bufp+n > d.bufsize {
+		if err := d.doflush(); err != nil {
+			return nil, err
+		}
+	}
+	p := d.buf[d.bufp : d.bufp+n]
+	d.bufp += n
+	return p, nil
 }
 
 // Attach re-attaches to the display after a resize.

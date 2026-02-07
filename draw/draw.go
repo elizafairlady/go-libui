@@ -186,6 +186,34 @@ func (r Rectangle) Combine(s Rectangle) Rectangle {
 	return r
 }
 
+// Badrect checks for zero, negative size or insanely huge rectangle.
+func Badrect(r Rectangle) bool {
+	x := r.Dx()
+	y := r.Dy()
+	if x > 0 && y > 0 {
+		z := uint(x * y)
+		if z/uint(x) == uint(y) && z < 0x10000000 {
+			return false
+		}
+	}
+	return true
+}
+
+// Setalpha premultiplies a color by the given alpha value.
+func Setalpha(color uint32, alpha uint8) uint32 {
+	red := (color >> 24) & 0xFF
+	green := (color >> 16) & 0xFF
+	blue := (color >> 8) & 0xFF
+	// ignore incoming alpha, premultiply
+	red = (red * uint32(alpha)) / 255
+	green = (green * uint32(alpha)) / 255
+	blue = (blue * uint32(alpha)) / 255
+	return (red << 24) | (green << 16) | (blue << 8) | uint32(alpha)
+}
+
+// Drawld2chan maps log2(depth) to channel format.
+var Drawld2chan = [4]Pix{GREY1, GREY2, GREY4, CMAP8}
+
 // Pix is a channel descriptor: what order and depth of pixel components.
 type Pix uint32
 
@@ -202,21 +230,22 @@ const (
 )
 
 // Standard pixel formats.
+// Encoding: each byte is (type<<4)|nbits, packed MSB first per strtochan.
 const (
-	GREY1  Pix = 0x00000013
-	GREY2  Pix = 0x00000023
-	GREY4  Pix = 0x00000043
-	GREY8  Pix = 0x00000083
-	CMAP8  Pix = 0x00000585
-	RGB15  Pix = 0x05050155
-	RGB16  Pix = 0x06050165
-	RGB24  Pix = 0x08080888
-	RGBA32 Pix = 0x08080888 | (CAlpha+1)<<24 | 8<<28
-	ARGB32 Pix = (CAlpha+1)<<0 | 8<<4 | 0x00888808
-	ABGR32 Pix = (CAlpha+1)<<0 | 8<<4 | (CBlue+1)<<8 | 8<<12 | (CGreen+1)<<16 | 8<<20 | (CRed+1)<<24 | 8<<28
-	XRGB32 Pix = (CIgnore+1)<<0 | 8<<4 | 0x00888808
-	XBGR32 Pix = (CIgnore+1)<<0 | 8<<4 | (CBlue+1)<<8 | 8<<12 | (CGreen+1)<<16 | 8<<20 | (CRed+1)<<24 | 8<<28
-	BGR24  Pix = (CBlue+1)<<0 | 8<<4 | (CGreen+1)<<8 | 8<<12 | (CRed+1)<<16 | 8<<20
+	GREY1  Pix = 0x00000031
+	GREY2  Pix = 0x00000032
+	GREY4  Pix = 0x00000034
+	GREY8  Pix = 0x00000038
+	CMAP8  Pix = 0x00000058
+	RGB15  Pix = 0x61051525
+	RGB16  Pix = 0x00051625
+	RGB24  Pix = 0x00081828
+	RGBA32 Pix = 0x08182848
+	ARGB32 Pix = 0x48081828
+	ABGR32 Pix = 0x48281808
+	XRGB32 Pix = 0x68081828
+	XBGR32 Pix = 0x68281808
+	BGR24  Pix = 0x00281808
 )
 
 // Display represents a connection to a Plan 9 draw device.
@@ -232,6 +261,7 @@ type Display struct {
 	dirno       int     // directory number in /dev/draw
 	Image       *Image  // the display memory
 	Screen      *Screen // the window's screen (for window images)
+	ScreenImage *Image  // the screen image (may be window or display)
 	Windows     *Image  // the window (for rio)
 	White       *Image  // white
 	Black       *Image  // black
@@ -240,7 +270,8 @@ type Display struct {
 
 	// Buffer for protocol messages
 	buf     []byte
-	bufsize int
+	bufsize int // max buffer size
+	bufp    int // current position in buffer
 
 	// Default font
 	DefaultFont    *Font
@@ -254,6 +285,13 @@ type Display struct {
 
 	// Screen DPI
 	DPI int
+
+	// Window directory (for rio)
+	windir string
+	devdir string
+
+	// Is this a new-style display (sends screenimage id in flush)
+	isnew bool
 }
 
 // Screen represents a Plan 9 screen (for layers).

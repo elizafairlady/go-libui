@@ -8,7 +8,7 @@ func (dst *Image) Ellipse(c Point, a, b, thick int, src *Image, sp Point) {
 
 // EllipseOp is Ellipse with a compositing operator.
 func (dst *Image) EllipseOp(c Point, a, b, thick int, src *Image, sp Point, op Op) {
-	dst.doellipse('e', c, a, b, thick, src, sp, 0, 64, op)
+	dst.doellipse('e', c, a, b, thick, src, sp, 0, 0, op)
 }
 
 // FillEllipse fills an ellipse centered at c with semi-axes a and b.
@@ -18,17 +18,18 @@ func (dst *Image) FillEllipse(c Point, a, b int, src *Image, sp Point) {
 
 // FillEllipseOp is FillEllipse with a compositing operator.
 func (dst *Image) FillEllipseOp(c Point, a, b int, src *Image, sp Point, op Op) {
-	dst.doellipse('E', c, a, b, 0, src, sp, 0, 64, op)
+	dst.doellipse('E', c, a, b, 0, src, sp, 0, 0, op)
 }
 
 // Arc draws an arc of an ellipse centered at c with semi-axes a and b.
-// The arc extends from angle alpha to alpha+phi, measured in degrees*64.
+// The arc extends from angle alpha to alpha+phi, measured in degrees.
 func (dst *Image) Arc(c Point, a, b, thick int, src *Image, sp Point, alpha, phi int) {
 	dst.ArcOp(c, a, b, thick, src, sp, alpha, phi, SoverD)
 }
 
 // ArcOp is Arc with a compositing operator.
 func (dst *Image) ArcOp(c Point, a, b, thick int, src *Image, sp Point, alpha, phi int, op Op) {
+	alpha |= 1 << 31
 	dst.doellipse('e', c, a, b, thick, src, sp, alpha, phi, op)
 }
 
@@ -39,48 +40,39 @@ func (dst *Image) FillArc(c Point, a, b int, src *Image, sp Point, alpha, phi in
 
 // FillArcOp is FillArc with a compositing operator.
 func (dst *Image) FillArcOp(c Point, a, b int, src *Image, sp Point, alpha, phi int, op Op) {
+	alpha |= 1 << 31
 	dst.doellipse('E', c, a, b, 0, src, sp, alpha, phi, op)
 }
 
-func (dst *Image) doellipse(cmd byte, c Point, a, b, thick int, src *Image, sp Point, alpha, phi int, op Op) {
+func (dst *Image) doellipse(cmd byte, c Point, xr, yr, thick int, src *Image, sp Point, alpha, phi int, op Op) {
 	if dst == nil || dst.Display == nil {
 		return
 	}
 	d := dst.Display
 
-	srcid := 0
-	if src != nil {
-		srcid = src.id
+	if src == nil {
+		src = d.Black
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Build the ellipse message
-	// Format: 'e'/'E' dstid[4] c[2*4] a[4] b[4] thick[4] srcid[4] sp[2*4] alpha[4] phi[4]
-	var msg [1 + 4 + 2*4 + 4 + 4 + 4 + 4 + 2*4 + 4 + 4 + 1]byte
-	msg[0] = cmd
-	bplong(msg[1:], uint32(dst.id))
-	bplong(msg[5:], uint32(c.X))
-	bplong(msg[9:], uint32(c.Y))
-	bplong(msg[13:], uint32(a))
-	bplong(msg[17:], uint32(b))
-	bplong(msg[21:], uint32(thick))
-	bplong(msg[25:], uint32(srcid))
-	bplong(msg[29:], uint32(sp.X))
-	bplong(msg[33:], uint32(sp.Y))
-	bplong(msg[37:], uint32(alpha))
-	bplong(msg[41:], uint32(phi))
-
-	n := 45
-	if op != SoverD {
-		msg[n] = byte(op)
-		n++
-	}
-
-	if err := d.flushBuffer(n); err != nil {
+	// Uses _bufimageop: 'O' op prefix for non-SoverD
+	a, err := d.bufimageop(1+4+4+2*4+4+4+4+2*4+2*4, op)
+	if err != nil {
 		return
 	}
-	copy(d.buf[d.bufsize:], msg[:n])
-	d.bufsize += n
+
+	a[0] = cmd
+	bplong(a[1:], uint32(dst.id))
+	bplong(a[5:], uint32(src.id))
+	bplong(a[9:], uint32(c.X))
+	bplong(a[13:], uint32(c.Y))
+	bplong(a[17:], uint32(xr))
+	bplong(a[21:], uint32(yr))
+	bplong(a[25:], uint32(thick))
+	bplong(a[29:], uint32(sp.X))
+	bplong(a[33:], uint32(sp.Y))
+	bplong(a[37:], uint32(alpha))
+	bplong(a[41:], uint32(phi))
 }
